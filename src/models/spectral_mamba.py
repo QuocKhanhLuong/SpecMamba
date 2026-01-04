@@ -1,6 +1,21 @@
 """
-Spectral Mamba Architecture (Spec-VMamba)
-Combines Spectral Analysis with Visual State Space Models for medical image segmentation.
+Spectral Mamba Architecture (Spec-VMamba).
+
+Combines Spectral Analysis with Visual State Space Models (VMamba) for
+medical image segmentation. Implements dual-path processing: spatial context
+via selective state spaces and frequency-domain filtering for edge sharpness.
+
+Architecture:
+    - PatchEmbedding: Initial feature extraction
+    - SpectralVSSBlock: Dual-path (Mamba + FFT) processing
+    - U-Net style encoder-decoder with skip connections
+    - Spectral Gating for frequency-domain edge enhancement
+
+References:
+    [1] Liu et al., "VMamba: Visual State Space Model," arXiv, 2024.
+    [2] Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective
+        State Spaces," arXiv, 2023.
+    [3] Chi et al., "Fast Fourier Convolution," NeurIPS, 2020.
 """
 
 import torch

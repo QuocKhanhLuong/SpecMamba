@@ -1,15 +1,26 @@
 """
-Energy-Gated Gabor Mamba Network (EGM-Net)
+Energy-Gated Gabor Mamba Network (EGM-Net).
 
-A hybrid architecture for medical image segmentation combining:
-1. Monogenic Signal Processing (Physics-based edge detection)
-2. Mamba Encoder (Global context with O(N) complexity)
-3. Energy-Gated Gabor Implicit Decoder (Resolution-free sharp boundaries)
+A hybrid architecture for medical image segmentation combining physics-based
+signal processing with deep learning for artifact-free boundary delineation.
 
-Key innovations:
-- Dual-path: Coarse (Conv) + Fine (Implicit) branches
-- Energy gating: Suppress artifacts in flat regions
-- Gabor basis: Localized oscillations prevent Gibbs ringing
+Architecture Components:
+    1. Monogenic Signal Processing: Physics-based edge detection via Riesz transform
+    2. Mamba Encoder: Global context extraction with O(N) complexity
+    3. Coarse Branch: Convolutional decoder for smooth body segmentation
+    4. Fine Branch: Gabor implicit decoder for sharp boundaries
+    5. Energy-Gated Fusion: Selective boundary refinement
+
+Key Innovations:
+    - Dual-path decoding: Coarse (Conv) + Fine (Implicit) branches
+    - Energy gating: Suppress artifacts in flat/homogeneous regions
+    - Gabor basis: Localized oscillations prevent Gibbs ringing artifacts
+
+References:
+    [1] Felsberg & Sommer, "The Monogenic Signal," IEEE TSP, 2001.
+    [2] Sitzmann et al., "Implicit Neural Representations with Periodic
+        Activation Functions," NeurIPS, 2020.
+    [3] Liu et al., "VMamba: Visual State Space Model," arXiv, 2024.
 """
 
 import torch

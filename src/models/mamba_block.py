@@ -1,6 +1,19 @@
 """
-Mamba-like Block Module (Lightweight VSS Block Implementation)
-Pure PyTorch implementation of Visual State Space scanning without external SSM libraries.
+Mamba-like Block Module (Lightweight VSS Block Implementation).
+
+Pure PyTorch implementation of Visual State Space (VSS) blocks for 2D image
+processing without external SSM libraries. Uses GRU-based sequential scanning
+to simulate selective state space dynamics.
+
+Architecture:
+    - DirectionalScanner: Multi-directional sequential scanning (4 directions)
+    - VSSBlock: Core Mamba-like component with residual connections
+    - MambaBlockStack: Hierarchical stacking of VSS blocks
+
+References:
+    [1] Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective
+        State Spaces," arXiv, 2023.
+    [2] Liu et al., "VMamba: Visual State Space Model," arXiv, 2024.
 """
 
 import torch

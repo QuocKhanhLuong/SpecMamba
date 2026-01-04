@@ -1,25 +1,83 @@
 """
-Training Script for EGM-Net (Energy-Gated Gabor Mamba Network)
+Training Script for EGM-Net (Energy-Gated Gabor Mamba Network).
 
-This implements the special training procedure for implicit neural representations:
-1. Point sampling instead of full-image training
-2. Multi-scale coordinate sampling for resolution-free learning
-3. Energy-aware loss weighting
-4. Progressive training (coarse-to-fine)
+Implements specialized training procedure for implicit neural representations
+with energy-gated boundary refinement for medical image segmentation.
+
+Key Features:
+    - Point sampling instead of full-image training
+    - Multi-scale coordinate sampling for resolution-free learning
+    - Energy-aware loss weighting for boundary emphasis
+    - Progressive training (coarse-to-fine)
+
+References:
+    [1] O. Bernard et al., "Deep Learning Techniques for Automatic MRI Cardiac
+        Multi-structures Segmentation and Diagnosis," IEEE TMI, 2018.
+    [2] Sitzmann et al., "Implicit Neural Representations with Periodic
+        Activation Functions," NeurIPS, 2020.
+    [3] Liu et al., "VMamba: Visual State Space Model," arXiv, 2024.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from dataclasses import dataclass, field
 from torch.utils.data import DataLoader, TensorDataset
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 from pathlib import Path
 from tqdm import tqdm
 import math
+import logging
 
 from egm_net import EGMNet, EGMNetLite
 from physics_loss import DiceLoss, FocalLoss
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+@dataclass
+class EGMTrainingConfig:
+    """Configuration for EGM-Net training.
+    
+    Attributes:
+        learning_rate: Initial learning rate for optimizer.
+        weight_decay: L2 regularization weight.
+        num_epochs: Total training epochs.
+        batch_size: Training batch size.
+        num_points: Number of coordinate samples per image.
+        boundary_ratio: Ratio of boundary vs uniform samples.
+        spatial_weight: Loss weight for coarse branch.
+        point_weight: Loss weight for fine branch.
+        consistency_weight: Loss weight for coarse-fine consistency.
+        energy_weight: Extra weight for high-energy boundary regions.
+        save_interval: Checkpoint saving frequency (epochs).
+        checkpoint_dir: Directory for saving checkpoints.
+        device: Training device ('cuda' or 'cpu').
+    """
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-5
+    num_epochs: int = 100
+    batch_size: int = 8
+    num_points: int = 4096
+    boundary_ratio: float = 0.5
+    spatial_weight: float = 1.0
+    point_weight: float = 1.0
+    consistency_weight: float = 0.1
+    energy_weight: float = 0.5
+    save_interval: int = 10
+    checkpoint_dir: str = './checkpoints'
+    device: str = 'cuda'
 
 
 class CoordinateSampler:

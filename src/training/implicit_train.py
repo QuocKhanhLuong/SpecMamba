@@ -1,18 +1,70 @@
 """
-Training Script for Implicit Mamba Network
-Uses coordinate sampling instead of full image training.
+Training Script for Implicit Mamba Network.
+
+Implements coordinate sampling training procedure for continuous neural
+representations, enabling resolution-free medical image segmentation.
+
+Key Features:
+    - Coordinate-based point sampling instead of full image training
+    - Boundary-aware sampling for improved edge accuracy
+    - Multi-resolution validation capabilities
+
+References:
+    [1] Sitzmann et al., "Implicit Neural Representations with Periodic
+        Activation Functions," NeurIPS, 2020.
+    [2] Liu et al., "VMamba: Visual State Space Model," arXiv, 2024.
+    [3] Tancik et al., "Fourier Features Let Networks Learn High Frequency
+        Functions in Low Dimensional Domains," NeurIPS, 2020.
 """
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from dataclasses import dataclass
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from pathlib import Path
 import numpy as np
+import logging
 from typing import Tuple, Optional
 
 from implicit_mamba import ImplicitMambaNet, ImplicitLoss
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+@dataclass
+class ImplicitTrainingConfig:
+    """Configuration for Implicit Mamba Network training.
+    
+    Attributes:
+        num_samples: Number of coordinate samples per image.
+        boundary_ratio: Ratio of boundary vs random samples.
+        learning_rate: Initial learning rate.
+        weight_decay: L2 regularization weight.
+        num_epochs: Total training epochs.
+        batch_size: Training batch size.
+        checkpoint_dir: Directory for saving checkpoints.
+        device: Training device ('cuda' or 'cpu').
+    """
+    num_samples: int = 4096
+    boundary_ratio: float = 0.3
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-5
+    num_epochs: int = 100
+    batch_size: int = 8
+    checkpoint_dir: str = './checkpoints'
+    device: str = 'cuda'
 
 
 class CoordinateSamplingDataset(Dataset):

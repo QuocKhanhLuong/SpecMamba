@@ -1,6 +1,15 @@
 """
-Model Analysis Script for EGM-Net
-Calculates parameters, GFLOPs, and analyzes architecture components.
+Model Analysis Script for EGM-Net.
+
+Provides comprehensive analysis of the Energy-Gated Gabor Mamba Network
+including parameter profiling, component breakdown, and architecture
+comparison with baseline models.
+
+Analysis Features:
+    - Per-module parameter breakdown
+    - Full vs Lite model comparison
+    - Forward pass verification
+    - ASCII architecture diagram with innovation highlights
 """
 
 import torch

@@ -1,8 +1,16 @@
 """
-Training Configuration and Utilities
+Configuration Classes for Spec-VMamba Training.
+
+Provides dataclass-based configurations for model architecture, loss functions,
+and training hyperparameters. Uses nested configurations for modularity.
+
+References:
+    [1] Liu et al., "VMamba: Visual State Space Model," arXiv, 2024.
+    [2] Ronneberger et al., "U-Net: Convolutional Networks for Biomedical
+        Image Segmentation," MICCAI, 2015.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 

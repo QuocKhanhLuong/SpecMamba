@@ -1,6 +1,15 @@
 """
-Quick Test Script for SpectralVMUNet
-Validates the architecture without requiring full dataset.
+Architecture Validation Test Suite for SpectralVMUNet.
+
+Provides comprehensive testing for all model components without requiring
+a full dataset. Verifies tensor shapes, gradient flow, memory usage,
+and loss function computations.
+
+Test Categories:
+    - Module tests: SpectralGating, DirectionalScanner, VSSBlock
+    - Integration tests: Full network forward/backward passes
+    - Loss function tests: Dice, Frequency, SpectralDual, BoundaryAware
+    - Memory efficiency tests
 """
 
 import torch

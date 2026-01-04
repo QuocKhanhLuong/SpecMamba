@@ -1,6 +1,15 @@
 """
-Model Analysis Script
-Calculates parameters, GFLOPs, and network depth for SpectralVMUNet.
+Model Analysis Script for SpectralVMUNet.
+
+Provides comprehensive model profiling including parameter counts, FLOPs
+estimation, memory usage analysis, and architecture visualization.
+
+Analysis Features:
+    - Parameter counting (total, trainable, per-module)
+    - FLOPs estimation via hook-based forward pass tracing
+    - Network depth analysis (layers, stages)
+    - Memory footprint estimation
+    - ASCII architecture visualization
 """
 
 import torch
