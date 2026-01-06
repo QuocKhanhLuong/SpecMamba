@@ -72,34 +72,56 @@ class SpectralVSSBlock(nn.Module):
         mamba_depth: Number of stacked Mamba blocks
         expansion_ratio: Channel expansion in Mamba blocks
         spectral_threshold: Threshold for spectral gating
+        use_mamba: Enable Mamba (VSS) blocks
+        use_spectral: Enable Spectral (FFT) gating
     """
     
     def __init__(self, channels: int, height: int, width: int,
                  mamba_depth: int = 2, expansion_ratio: float = 2.0,
-                 spectral_threshold: float = 0.1):
+                 spectral_threshold: float = 0.1,
+                 use_mamba: bool = True, use_spectral: bool = True):
         super().__init__()
         
         self.channels = channels
         self.height = height
         self.width = width
+        self.use_mamba = use_mamba
+        self.use_spectral = use_spectral
         
-        # Branch A: Spatial path (VSS/Mamba Blocks)
-        self.vss_blocks = MambaBlockStack(
-            channels, 
-            depth=mamba_depth,
-            expansion_ratio=expansion_ratio,
-            scan_dim=min(64, channels)
-        )
+        # Branch A: Spatial path (VSS/Mamba Blocks or Conv fallback)
+        if use_mamba and mamba_depth > 0:
+            self.vss_blocks = MambaBlockStack(
+                channels, 
+                depth=mamba_depth,
+                expansion_ratio=expansion_ratio,
+                scan_dim=min(64, channels)
+            )
+        else:
+            # Convolutional fallback (baseline)
+            self.vss_blocks = nn.Sequential(
+                nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+                nn.GroupNorm(min(32, channels), channels),
+                nn.GELU(),
+                nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+                nn.GroupNorm(min(32, channels), channels),
+                nn.GELU()
+            )
         
         # Branch B: Spectral path (FFT-based filtering)
-        self.spectral_gate = SpectralGating(
-            channels, height, width,
-            threshold=spectral_threshold,
-            complex_init="kaiming"
-        )
+        if use_spectral:
+            self.spectral_gate = SpectralGating(
+                channels, height, width,
+                threshold=spectral_threshold,
+                complex_init="kaiming"
+            )
+        else:
+            self.spectral_gate = None
         
-        # Learnable fusion weight (σ(w) blends spatial and spectral)
-        self.fusion_weight = nn.Parameter(torch.tensor(0.5))
+        # Learnable fusion weight (only needed if both branches active)
+        if use_mamba and use_spectral:
+            self.fusion_weight = nn.Parameter(torch.tensor(0.5))
+        else:
+            self.fusion_weight = None
         
         # Optional: Layer norm for stability
         self.norm = nn.GroupNorm(min(32, channels), channels)
@@ -114,20 +136,28 @@ class SpectralVSSBlock(nn.Module):
         Returns:
             Output tensor (B, C, H, W)
         """
-        # Branch A: Spatial context via Mamba
+        # Branch A: Spatial context via Mamba or Conv
         spatial_out = self.vss_blocks(x)
         
-        # Branch B: Frequency filtering via FFT
-        spectral_out = self.spectral_gate(x)
-        
-        # Learnable fusion
-        weight = torch.sigmoid(self.fusion_weight)
-        output = weight * spatial_out + (1 - weight) * spectral_out
+        # Branch B: Frequency filtering via FFT (if enabled)
+        if self.use_spectral and self.spectral_gate is not None:
+            spectral_out = self.spectral_gate(x)
+            
+            # Learnable fusion
+            if self.fusion_weight is not None:
+                weight = torch.sigmoid(self.fusion_weight)
+                output = weight * spatial_out + (1 - weight) * spectral_out
+            else:
+                output = (spatial_out + spectral_out) / 2.0
+        else:
+            # Only spatial path
+            output = spatial_out
         
         # Normalize
         output = self.norm(output)
         
         return output
+
 
 
 # =============================================================================
@@ -222,14 +252,22 @@ class HRNetStage(nn.Module):
         width: Feature map width
         num_blocks: Number of SpectralVSSBlocks
         mamba_depth: Depth of Mamba blocks within each SpectralVSSBlock
+        use_mamba: Enable Mamba blocks
+        use_spectral: Enable Spectral gating
     """
     
     def __init__(self, channels: int, height: int, width: int,
-                 num_blocks: int = 2, mamba_depth: int = 2):
+                 num_blocks: int = 2, mamba_depth: int = 2,
+                 use_mamba: bool = True, use_spectral: bool = True):
         super().__init__()
         
         self.blocks = nn.ModuleList([
-            SpectralVSSBlock(channels, height, width, mamba_depth=mamba_depth)
+            SpectralVSSBlock(
+                channels, height, width, 
+                mamba_depth=mamba_depth,
+                use_mamba=use_mamba,
+                use_spectral=use_spectral
+            )
             for _ in range(num_blocks)
         ])
     
@@ -238,6 +276,7 @@ class HRNetStage(nn.Module):
         for block in self.blocks:
             x = block(x)
         return x
+
 
 
 # =============================================================================
@@ -371,17 +410,22 @@ class HRNetV2MambaBackbone(nn.Module):
         blocks_per_stage: Number of SpectralVSSBlocks per stage
         mamba_depth: Depth within each SpectralVSSBlock
         img_size: Input image size (for spectral weight initialization)
+        use_mamba: Enable Mamba (VSS) blocks (set False for pure conv baseline)
+        use_spectral: Enable Spectral (FFT) gating (set False for baseline)
     """
     
     def __init__(self, in_channels: int = 3, base_channels: int = 64,
                  num_stages: int = 4, blocks_per_stage: int = 2,
-                 mamba_depth: int = 2, img_size: int = 256):
+                 mamba_depth: int = 2, img_size: int = 256,
+                 use_mamba: bool = True, use_spectral: bool = True):
         super().__init__()
         
         self.in_channels = in_channels
         self.base_channels = base_channels
         self.num_stages = num_stages
         self.img_size = img_size
+        self.use_mamba = use_mamba
+        self.use_spectral = use_spectral
         
         # Initial stem: stride 4 reduction
         self.stem = HRNetStem(in_channels, base_channels, stride=4)
@@ -418,7 +462,9 @@ class HRNetV2MambaBackbone(nn.Module):
                     height=high_res_size,
                     width=high_res_size,
                     num_blocks=blocks_per_stage,
-                    mamba_depth=mamba_depth
+                    mamba_depth=mamba_depth,
+                    use_mamba=use_mamba,
+                    use_spectral=use_spectral
                 )
             )
             
@@ -429,7 +475,9 @@ class HRNetV2MambaBackbone(nn.Module):
                     height=low_res_size,
                     width=low_res_size,
                     num_blocks=blocks_per_stage,
-                    mamba_depth=mamba_depth
+                    mamba_depth=mamba_depth,
+                    use_mamba=use_mamba,
+                    use_spectral=use_spectral
                 )
             )
             
@@ -439,6 +487,7 @@ class HRNetV2MambaBackbone(nn.Module):
                     high_channels=high_channels,
                     low_channels=low_channels,
                     scale_factor=2
+
                 )
             )
         

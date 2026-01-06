@@ -1,0 +1,138 @@
+# =============================================================================
+# EGM-Net Configuration File
+# =============================================================================
+# This file controls all configurable aspects of the EGM-Net architecture.
+# Baseline: HRNet (pure convolutional, no Mamba/Spectral)
+# SOTA: HRNet + Mamba + Spectral + Implicit Decoder
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Model Architecture
+# -----------------------------------------------------------------------------
+model:
+  name: "EGMNet"
+  
+  # Input/Output Configuration
+  in_channels: 3            # 1=grayscale, 3=Monogenic (Intensity, Rx, Ry)
+  num_classes: 4            # Number of segmentation classes
+  img_size: 256             # Input image size (square)
+  
+  # Backbone Configuration
+  backbone:
+    type: "hrnet"           # "hrnet" (baseline) or "hrnet_mamba" (SOTA)
+    base_channels: 64       # Base channel dimension
+    num_stages: 4           # Number of HRNet stages
+    blocks_per_stage: 2     # SpectralVSS blocks per stage
+    
+    # Low-Resolution Stream Multiplier (HRNet standard: 2x)
+    low_res_multiplier: 2   # low_channels = base_channels * low_res_multiplier
+    
+  # Auxiliary Components (Enable/Disable)
+  # Set to false to use baseline (pure convolution)
+  components:
+    # Mamba (State Space Model) - Spatial Context
+    use_mamba: true
+    mamba_depth: 2          # Number of VSS blocks stacked
+    mamba_scan_dim: 64      # Hidden dimension for directional scanner
+    
+    # Spectral Gating (FFT-based) - Frequency Domain Processing
+    use_spectral: true
+    spectral_threshold: 0.1 # Frequency filtering threshold
+    
+    # Dual-Stream Fusion (High-Res + Low-Res interaction)
+    use_dual_stream: true
+    
+# -----------------------------------------------------------------------------
+# Segmentation Heads
+# -----------------------------------------------------------------------------
+heads:
+  # Coarse Head Configuration
+  coarse:
+    type: "constellation"   # "linear" (baseline) or "constellation" (RBF)
+    embedding_dim: 2        # I/Q constellation space dimension
+    init_gamma: 1.0         # Initial RBF temperature
+    
+  # Fine Head Configuration
+  fine:
+    type: "implicit"        # "none" (baseline), "implicit" (Gabor INR)
+    enabled: true           # Set to false to disable fine head entirely
+    hidden_dim: 256         # MLP hidden dimension
+    num_layers: 4           # Number of FiLM layers
+    num_frequencies: 64     # Gabor basis frequencies
+    
+    # Energy Gating (Physics-based refinement)
+    use_energy_gating: true
+    
+  # Fusion Strategy
+  fusion:
+    type: "energy_gated"    # "simple" (average) or "energy_gated" (physics)
+    temperature: 1.0        # Fusion softmax temperature
+
+# -----------------------------------------------------------------------------
+# Loss Functions
+# -----------------------------------------------------------------------------
+loss:
+  # Primary Losses
+  dice_weight: 1.0
+  ce_weight: 0.5
+  focal_weight: 0.0         # Set > 0 to enable focal loss
+  focal_gamma: 2.0
+  
+  # Auxiliary Losses (Physics-inspired)
+  boundary_weight: 0.1      # BoundaryAwareLoss weight
+  spectral_weight: 0.0      # SpectralDualLoss weight (experimental)
+  
+  # Eye Opening Loss (Entropy minimization at boundaries)
+  eye_opening:
+    enabled: true
+    weight: 0.05
+    warmup_epochs: 10       # Start applying after N epochs
+    radius: 5               # Boundary dilation radius
+    
+  # Coarse-Fine Consistency Loss
+  consistency:
+    enabled: true
+    weight: 0.1
+
+# -----------------------------------------------------------------------------
+# Training Configuration
+# -----------------------------------------------------------------------------
+training:
+  epochs: 100
+  batch_size: 8
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  optimizer: "adamw"        # "adam", "adamw", "sgd"
+  scheduler: "cosine"       # "cosine", "step", "plateau"
+  
+  # Point Sampling for Fine Head (Training Only)
+  point_sampling:
+    enabled: true
+    num_samples: 4096       # Points per image
+    strategy: "uncertainty_energy"  # "random", "uncertainty", "energy", "uncertainty_energy"
+    
+  # Data Augmentation
+  augmentation:
+    random_flip: true
+    random_rotation: true   # Uses JointVectorRotation for Riesz
+    rotation_range: 15      # Degrees
+    
+# -----------------------------------------------------------------------------
+# Inference Configuration
+# -----------------------------------------------------------------------------
+inference:
+  # Resolution-Free Inference (Implicit Head)
+  use_implicit: true        # Use implicit decoder for arbitrary resolution
+  output_scale: 1.0         # Output resolution multiplier (1.0 = input size)
+  
+  # Ensemble (Future)
+  tta_enabled: false        # Test-time augmentation
+
+# -----------------------------------------------------------------------------
+# Presets (Quick Configuration)
+# -----------------------------------------------------------------------------
+# To use a preset, set model.preset to one of the following:
+#   - "baseline": Pure HRNet + Linear head (fastest, ~3M params)
+#   - "lite": HRNet + Constellation head (balanced, ~4M params)
+#   - "sota": Full EGM-Net (best quality, ~7.5M params)
+preset: "sota"

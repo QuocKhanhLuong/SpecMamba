@@ -143,6 +143,11 @@ class EGMNet(nn.Module):
         base_channels: Base channel count for backbone
         num_stages: Number of backbone stages
         use_hrnet: Use HRNetV2 backbone (True) or simpler encoder (False)
+        use_mamba: Enable Mamba (VSS) blocks in backbone
+        use_spectral: Enable Spectral (FFT) gating in backbone
+        use_fine_head: Enable implicit fine head
+        coarse_head_type: "constellation" (RBF) or "linear"
+        fusion_type: "energy_gated" or "simple"
         implicit_hidden: Hidden dim for implicit decoder
         implicit_layers: Number of implicit decoder layers
         num_frequencies: Number of Gabor frequencies
@@ -151,6 +156,10 @@ class EGMNet(nn.Module):
     def __init__(self, in_channels: int = 3, num_classes: int = 4,
                  img_size: int = 256, base_channels: int = 64,
                  num_stages: int = 4, use_hrnet: bool = True,
+                 use_mamba: bool = True, use_spectral: bool = True,
+                 use_fine_head: bool = True, 
+                 coarse_head_type: str = "constellation",
+                 fusion_type: str = "energy_gated",
                  implicit_hidden: int = 256, implicit_layers: int = 4,
                  num_frequencies: int = 64):
         super().__init__()
@@ -159,6 +168,9 @@ class EGMNet(nn.Module):
         self.num_classes = num_classes
         self.img_size = img_size
         self.use_hrnet = use_hrnet
+        self.use_fine_head = use_fine_head
+        self.coarse_head_type = coarse_head_type
+        self.fusion_type = fusion_type
         
         # 1. Monogenic Energy Extractor (fixed, non-trainable)
         # For computing energy maps from input images
@@ -171,8 +183,10 @@ class EGMNet(nn.Module):
                 base_channels=base_channels,
                 num_stages=num_stages,
                 blocks_per_stage=2,
-                mamba_depth=2,
-                img_size=img_size
+                mamba_depth=2 if use_mamba else 0,
+                img_size=img_size,
+                use_mamba=use_mamba,
+                use_spectral=use_spectral
             )
             backbone_channels = self.backbone.out_channels
         else:
@@ -186,31 +200,50 @@ class EGMNet(nn.Module):
         
         self.backbone_channels = backbone_channels
         
-        # 3. Coarse Head: RBF Constellation
-        self.coarse_head = RBFConstellationHead(
-            in_channels=backbone_channels,
-            num_classes=num_classes,
-            embedding_dim=2,
-            init_gamma=1.0
-        )
+        # 3. Coarse Head: RBF Constellation or Linear
+        if coarse_head_type == "constellation":
+            self.coarse_head = RBFConstellationHead(
+                in_channels=backbone_channels,
+                num_classes=num_classes,
+                embedding_dim=2,
+                init_gamma=1.0
+            )
+        else:
+            # Simple linear head (baseline)
+            self.coarse_head = nn.Sequential(
+                nn.Conv2d(backbone_channels, backbone_channels // 2, 3, padding=1),
+                nn.GroupNorm(min(32, backbone_channels // 2), backbone_channels // 2),
+                nn.GELU(),
+                nn.Conv2d(backbone_channels // 2, num_classes, 1)
+            )
         
-        # 4. Fine Head: Energy-Gated Gabor Implicit
-        self.fine_head = EnergyGatedImplicitHead(
-            feature_channels=backbone_channels,
-            num_classes=num_classes,
-            hidden_dim=implicit_hidden,
-            num_layers=implicit_layers,
-            num_frequencies=num_frequencies
-        )
+        # 4. Fine Head: Energy-Gated Gabor Implicit (optional)
+        if use_fine_head:
+            self.fine_head = EnergyGatedImplicitHead(
+                feature_channels=backbone_channels,
+                num_classes=num_classes,
+                hidden_dim=implicit_hidden,
+                num_layers=implicit_layers,
+                num_frequencies=num_frequencies
+            )
+        else:
+            self.fine_head = None
         
-        # 5. Energy-Gated Fusion
-        self.fusion = EnergyGatedFusion(temperature=1.0)
+        # 5. Fusion (only needed if fine head is enabled)
+        if use_fine_head:
+            if fusion_type == "energy_gated":
+                self.fusion = EnergyGatedFusion(temperature=1.0)
+            else:
+                self.fusion = None  # Simple average
+        else:
+            self.fusion = None
         
         # Store feature size for output upsampling
         if use_hrnet:
             self.feature_size = img_size // 4
         else:
             self.feature_size = img_size // (2 ** num_stages)
+
     
     def _compute_energy(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict]:
         """
@@ -276,38 +309,53 @@ class EGMNet(nn.Module):
         else:
             features = self.backbone(x)
         
-        # 3. Coarse Head (RBF Constellation)
-        coarse_logits, embeddings = self.coarse_head(features)
+        # 3. Coarse Head
+        if self.coarse_head_type == "constellation":
+            coarse_logits, embeddings = self.coarse_head(features)
+        else:
+            # Linear head returns only logits
+            coarse_logits = self.coarse_head(features)
+            embeddings = None
         
         # Upsample coarse to output size
         coarse = F.interpolate(coarse_logits, size=output_size,
                               mode='bilinear', align_corners=True)
         
-        # 4. Fine Head (Energy-Gated Gabor Implicit)
-        # Resize energy to feature size for implicit head
-        energy_for_fine = F.interpolate(energy, size=features.shape[-2:],
-                                        mode='bilinear', align_corners=True)
-        
-        fine_logits = self.fine_head(features, energy_for_fine, output_size=output_size)
-        
-        # Ensure fine is same size as coarse
-        if fine_logits.shape[-2:] != output_size:
-            fine_logits = F.interpolate(fine_logits, size=output_size,
-                                       mode='bilinear', align_corners=True)
-        
-        # 5. Energy-Gated Fusion
-        output = self.fusion(coarse, fine_logits, energy)
+        # 4. Fine Head (Energy-Gated Gabor Implicit) - Optional
+        if self.use_fine_head and self.fine_head is not None:
+            # Resize energy to feature size for implicit head
+            energy_for_fine = F.interpolate(energy, size=features.shape[-2:],
+                                            mode='bilinear', align_corners=True)
+            
+            fine_logits = self.fine_head(features, energy_for_fine, output_size=output_size)
+            
+            # Ensure fine is same size as coarse
+            if fine_logits.shape[-2:] != output_size:
+                fine_logits = F.interpolate(fine_logits, size=output_size,
+                                           mode='bilinear', align_corners=True)
+            
+            # 5. Energy-Gated Fusion
+            if self.fusion is not None:
+                output = self.fusion(coarse, fine_logits, energy)
+            else:
+                # Simple average fusion
+                output = (coarse + fine_logits) / 2.0
+        else:
+            # Baseline mode: No fine head, output is just coarse
+            fine_logits = None
+            output = coarse
         
         if return_intermediates:
             return {
                 'output': output,
                 'coarse': coarse,
-                'fine': fine_logits,
+                'fine': fine_logits if fine_logits is not None else coarse,
                 'energy': energy,
                 'embeddings': embeddings
             }
         else:
             return {'output': output}
+
     
     def inference(self, x: torch.Tensor, 
                   output_size: Optional[Tuple[int, int]] = None) -> torch.Tensor:
@@ -322,6 +370,69 @@ class EGMNet(nn.Module):
             Segmentation logits (B, num_classes, H, W)
         """
         return self.forward(x, output_size, return_intermediates=False)['output']
+    
+    def sample_points(self, coarse_logits: torch.Tensor, 
+                      energy_map: torch.Tensor, 
+                      num_samples: int = 4096) -> torch.Tensor:
+        """
+        Sample points based on Uncertainty + Energy logic.
+        
+        Logic:
+           1. Compute Uncertainty Map (Entropy or Margin) from coarse predictions.
+           2. Combine with Energy Map: P_sample ∝ (Uncertainty + Energy)
+           3. Sample coordinates from this distribution.
+           
+        Args:
+            coarse_logits: Coarse segmentation logits (B, num_classes, H, W)
+            energy_map: Monogenic energy map (B, 1, H, W)
+            num_samples: Number of points to sample per image
+            
+        Returns:
+            Sampled coordinates (B, N, 2) in [-1, 1] range
+        """
+        B, C, H, W = coarse_logits.shape
+        device = coarse_logits.device
+        
+        # 1. Compute Uncertainty (1 - max_prob)
+        # Softmax probabilities
+        probs = F.softmax(coarse_logits, dim=1)
+        # Max probability per pixel
+        max_prob, _ = probs.max(dim=1, keepdim=True)  # (B, 1, H, W)
+        # Uncertainty: High where max_prob is low (near 1/num_classes)
+        uncertainty = 1.0 - max_prob 
+        
+        # 2. Resizing Energy Map to match coarse logits
+        if energy_map.shape[-2:] != (H, W):
+            energy_map = F.interpolate(
+                energy_map, size=(H, W), mode='bilinear', align_corners=True
+            )
+            
+        # 3. Combine Uncertainty + Energy for Sampling Probability
+        # Normalize both to [0, 1] for balanced combination
+        uncertainty = (uncertainty - uncertainty.min()) / (uncertainty.max() - uncertainty.min() + 1e-8)
+        # Weighting: Bias strongly towards uncertainty (boundaries) and high energy
+        sample_weights = uncertainty + 0.5 * energy_map
+        
+        # Flatten for sampling
+        sample_weights_flat = sample_weights.view(B, -1)  # (B, H*W)
+        
+        # 4. Multinomial Sampling
+        # Sample indices based on weights
+        indices = torch.multinomial(sample_weights_flat, num_samples, replacement=True)  # (B, N)
+        
+        # Convert indices to coordinates [-1, 1]
+        # x_idx = index % W, y_idx = index // W
+        x_idx = indices % W
+        y_idx = indices // W
+        
+        # Normalize to [-1, 1]
+        # (x + 0.5) / W * 2 - 1  (using +0.5 to sample pixel centers)
+        x_norm = (x_idx.float() + 0.5) / W * 2.0 - 1.0
+        y_norm = (y_idx.float() + 0.5) / H * 2.0 - 1.0
+        
+        coords = torch.stack([x_norm, y_norm], dim=-1)  # (B, N, 2)
+        
+        return coords
     
     def query_points(self, x: torch.Tensor, 
                      coords: torch.Tensor) -> torch.Tensor:
@@ -453,15 +564,15 @@ if __name__ == "__main__":
     print("Testing EGM-Net (Energy-Gated Gabor Mamba Network)")
     print("=" * 60)
     
-    # Test with simple encoder first (no HRNet dependencies)
-    print("\n[1] Testing EGM-Net with Simple Encoder...")
+    # Test with Full HRNetV2-Mamba Backbone (SOTA Configuration)
+    print("\n[1] Testing Full EGM-Net (HRNetV2-Mamba Backbone)...")
     model = EGMNet(
         in_channels=3,
         num_classes=4,
         img_size=256,
         base_channels=64,
         num_stages=4,
-        use_hrnet=False  # Use simple encoder for testing
+        use_hrnet=True  # Use Full HRNetV2-Mamba
     )
     
     # 3-channel input: Intensity + Rx + Ry
@@ -498,8 +609,16 @@ if __name__ == "__main__":
     print(f"Lite model parameters: {lite_params:,}")
     print(f"Lite output: {lite_outputs['output'].shape}")
     
+    # Test sample_points (Uncertainty + Energy)
+    print("\n[4] Testing Training Sampling (Uncertainty + Energy)...")
+    coarse_logits = outputs['coarse']
+    energy_map = outputs['energy']
+    sampled_coords = model.sample_points(coarse_logits, energy_map, num_samples=1024)
+    print(f"Sampled coords: {sampled_coords.shape}")
+    print(f"Range: [{sampled_coords.min():.3f}, {sampled_coords.max():.3f}]")
+    
     # Test single-channel input (energy computed online)
-    print("\n[4] Testing Single-Channel Input (Auto Energy)...")
+    print("\n[5] Testing Single-Channel Input (Auto Energy)...")
     x_single = torch.randn(2, 1, 256, 256)
     model_single = EGMNet(in_channels=1, num_classes=4, img_size=256, use_hrnet=False)
     outputs_single = model_single(x_single)

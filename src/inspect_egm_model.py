@@ -225,20 +225,31 @@ def inspect_model():
     # Configuration
     configs = [
         {
-            'name': 'EGM-Net (Full)',
+            'name': 'EGM-Net (SOTA: HRNetV2+Mamba)',
             'in_channels': 3,
             'num_classes': 4,
             'img_size': 256,
-            'model_fn': lambda: EGMNet(in_channels=3, num_classes=4, img_size=256, use_hrnet=True)
+            'model_fn': lambda: EGMNet(
+                in_channels=3, 
+                num_classes=4, 
+                img_size=256, 
+                use_hrnet=True,
+                base_channels=64, # High-Res dim
+                num_stages=4
+            )
         },
         # {
-        #     'name': 'EGM-Net Lite',
-        #     'in_channels': 1,
-        #     'num_classes': 3,
-        #     'img_size': 256,
-        #     'model_fn': lambda: EGMNetLite(in_channels=1, num_classes=3, img_size=256)
+        #     'name': 'Backbone Only (HRNetV2-Mamba)',
+        #     'in_channels': 3,
+        #     'num_classes': 4,
+        #     'img_size': 256, 
+        #     'model_fn': lambda: EGMNet(..., use_hrnet=True).backbone
         # }
     ]
+    
+    print("Note: GFLOPs estimation primarily covers Conv2d/Linear layers.")
+    print("      Complex operations (FFT, Selective Scan) in Mamba/Spectral blocks")
+    print("      are not fully captured by standard hooks, so actual compute is higher.")
     
     for config in configs:
         print("\n" + "-" * 80)

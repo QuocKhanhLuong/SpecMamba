@@ -1,19 +1,51 @@
+"""
+Segmentation Metrics for Medical Image Segmentation.
+
+Provides comprehensive metrics including:
+- Dice Score (per-class and mean)
+- IoU / Jaccard Index
+- HD95 (Hausdorff Distance 95th percentile)
+- Precision, Recall, F1-Score
+- Pixel Accuracy
+"""
+
 import torch
 import torch.nn.functional as F
 import numpy as np
 from monai.metrics import compute_hausdorff_distance
 
+
 def count_parameters(model):
     """Count trainable parameters in a model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+
 class SegmentationMetrics:
+    """
+    Comprehensive segmentation metrics calculator.
+    
+    Tracks and computes:
+    - Pixel Accuracy (global)
+    - Dice Score (batch-averaged, per-class)
+    - IoU (batch-averaged, per-class)
+    - HD95 (batch-averaged, per-class)
+    - Precision/Recall/F1 (globally aggregated)
+    
+    Usage:
+        metrics = SegmentationMetrics(num_classes=4, device='cuda')
+        for batch in dataloader:
+            preds = model(batch['image']).argmax(dim=1)
+            metrics.update(preds, batch['label'])
+        results = metrics.compute()
+    """
+    
     def __init__(self, num_classes, device):
         self.num_classes = num_classes
         self.device = device
         self.reset()
         
     def reset(self):
+        """Reset all accumulated statistics."""
         self.batches = 0
         self.total_correct_pixels = 0
         self.total_pixels = 0
@@ -34,6 +66,7 @@ class SegmentationMetrics:
     def update(self, preds, targets):
         """
         Update metrics with a new batch.
+        
         Args:
             preds: (B, H, W) Tensor of class indices.
             targets: (B, H, W) Tensor of class indices.
@@ -70,15 +103,11 @@ class SegmentationMetrics:
             self.iou_sum[c] += iou
             
         # HD95 Compliance (MONAI)
-        # compute_hausdorff_distance expects (B, C, spatial...)
-        # include_background=True usually, but we iterate.
-        # We can compute all classes at once.
         try:
             import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 
-                # percentile=95
                 hd95_batch = compute_hausdorff_distance(
                     y_pred=preds_oh, 
                     y=targets_oh, 
@@ -89,11 +118,6 @@ class SegmentationMetrics:
             # hd95_batch is (B, C)
             
             for c in range(self.num_classes):
-                # Filter NaNs/Infs (happens if class missing in both pred and target, or just one)
-                # MONAI returns NaN if one is empty. We mostly care if target exists.
-                # Common practice: if target is empty, skip. If target exists but pred empty, HD is high (inf).
-                # MONAI behavior: Nan if both empty. Inf if one empty.
-                
                 valid_vals = hd95_batch[:, c]
                 valid_mask = ~torch.isnan(valid_vals) & ~torch.isinf(valid_vals)
                 
@@ -102,13 +126,12 @@ class SegmentationMetrics:
                     self.hd95_counts[c] += valid_mask.sum()
                     
         except Exception as e:
-            # Fallback or strict error? 
-            # Often happens if shapes are weird or empty batch.
             pass
 
     def compute(self):
         """
         Compute final aggregated metrics.
+        
         Returns:
             dict containing scalar values and per-class lists.
         """
@@ -134,7 +157,7 @@ class SegmentationMetrics:
             if self.hd95_counts[c] > 0:
                 hd95_scores.append((self.hd95_sum[c] / self.hd95_counts[c]).item())
             else:
-                hd95_scores.append(float('nan')) # Or 0.0 or inf
+                hd95_scores.append(float('nan'))
             
             # Global-based Precision/Recall/F1
             p = (self.tp[c] / (self.tp[c] + self.fp[c] + 1e-6)).item()
@@ -152,4 +175,65 @@ class SegmentationMetrics:
         metrics['recall'] = recall_scores
         metrics['f1_score'] = f1_scores
         
+        # Mean metrics (excluding background class 0 if desired)
+        metrics['mean_dice'] = np.nanmean(dice_scores[1:]) if len(dice_scores) > 1 else dice_scores[0]
+        metrics['mean_iou'] = np.nanmean(iou_scores[1:]) if len(iou_scores) > 1 else iou_scores[0]
+        metrics['mean_hd95'] = np.nanmean([h for h in hd95_scores[1:] if not np.isnan(h)]) if len(hd95_scores) > 1 else hd95_scores[0]
+        
         return metrics
+
+
+def dice_score(pred, target, num_classes, smooth=1e-6):
+    """
+    Compute Dice score for each class.
+    
+    Args:
+        pred: (B, H, W) predicted class indices
+        target: (B, H, W) ground truth class indices
+        num_classes: number of classes
+        smooth: smoothing factor to avoid division by zero
+        
+    Returns:
+        List of Dice scores per class
+    """
+    dice_scores = []
+    
+    for c in range(num_classes):
+        pred_c = (pred == c).float()
+        target_c = (target == c).float()
+        
+        intersection = (pred_c * target_c).sum()
+        union = pred_c.sum() + target_c.sum()
+        
+        dice = (2. * intersection + smooth) / (union + smooth)
+        dice_scores.append(dice.item())
+    
+    return dice_scores
+
+
+def iou_score(pred, target, num_classes, smooth=1e-6):
+    """
+    Compute IoU (Jaccard) score for each class.
+    
+    Args:
+        pred: (B, H, W) predicted class indices
+        target: (B, H, W) ground truth class indices
+        num_classes: number of classes
+        smooth: smoothing factor
+        
+    Returns:
+        List of IoU scores per class
+    """
+    iou_scores = []
+    
+    for c in range(num_classes):
+        pred_c = (pred == c).float()
+        target_c = (target == c).float()
+        
+        intersection = (pred_c * target_c).sum()
+        union = pred_c.sum() + target_c.sum() - intersection
+        
+        iou = (intersection + smooth) / (union + smooth)
+        iou_scores.append(iou.item())
+    
+    return iou_scores
