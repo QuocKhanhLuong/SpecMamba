@@ -4,32 +4,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Dict
 import math
+import sys
+import os
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional, Tuple, Dict
-import math
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_src_dir = os.path.dirname(_current_dir)
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 try:
+    from layers.monogenic import EnergyMap, MonogenicSignal
+    from models.hrnet_mamba import HRNetV2MambaBackbone
+    from layers.constellation_head import RBFConstellationHead
+    from layers.gabor_implicit import EnergyGatedImplicitHead, GaborNet, ImplicitSegmentationHead
+    from models.mamba_block import VSSBlock, MambaBlockStack
+except ImportError:
     from ..layers.monogenic import EnergyMap, MonogenicSignal
-    from .hrnet_mamba import HRNetV2MambaBackbone, SpectralVSSBlock
+    from .hrnet_mamba import HRNetV2MambaBackbone
     from ..layers.constellation_head import RBFConstellationHead
     from ..layers.gabor_implicit import EnergyGatedImplicitHead, GaborNet, ImplicitSegmentationHead
     from .mamba_block import VSSBlock, MambaBlockStack
-except ImportError:
-    try:
 
-        import sys
-        sys.path.append("..")
-        from layers.monogenic import EnergyMap, MonogenicSignal
-        from models.hrnet_mamba import HRNetV2MambaBackbone, SpectralVSSBlock
-        from layers.constellation_head import RBFConstellationHead
-        from layers.gabor_implicit import EnergyGatedImplicitHead, GaborNet, ImplicitSegmentationHead
-        from models.mamba_block import VSSBlock, MambaBlockStack
-    except ImportError:
-
-        pass
 
 class EnergyGatedFusion(nn.Module):
 
