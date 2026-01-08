@@ -19,8 +19,48 @@ model:
     num_stages: 4
     blocks_per_stage: 2
     
+  # =============================================================================
+  # BLOCK OPTIONS (thay thế Mamba)
+  # =============================================================================
+  # Available blocks:
+  #   - "convnext"          : ConvNeXt Block (SOTA CNN, 7x7 depthwise)
+  #   - "dcn"               : Deformable Conv v2 (learnable kernel offsets)
+  #   - "inverted_residual" : MobileNetV2 style (lightweight)
+  #   - "swin"              : Swin Transformer (window attention)
+  #   - "fno"               : Fourier Neural Operator (spectral conv)
+  #   - "wavelet"           : Wavelet Transform Block (multi-scale)
+  #   - "rwkv"              : RWKV Block (linear attention)
+  #   - "mamba"             : Mamba SSM (requires mamba-ssm package)
+  #   - "none"              : No additional blocks (pure HRNet)
+  # =============================================================================
+  block:
+    type: "convnext"  # Default to ConvNeXt (stable, SOTA)
+    depth: 2          # Number of blocks per stage
+    
+    # Block-specific settings
+    convnext:
+      drop_path: 0.1
+      layer_scale_init: 1e-6
+      
+    swin:
+      num_heads: 8
+      window_size: 7
+      mlp_ratio: 4.0
+      
+    fno:
+      modes: 16
+      mlp_ratio: 2.0
+      
+    rwkv:
+      # No special params needed
+      
+    mamba:
+      d_state: 16
+      d_conv: 4
+      expand: 2
+    
   components:
-    # Mamba SSM (requires mamba-ssm package)
+    # Mamba SSM (legacy, requires mamba-ssm package)
     use_mamba: false
     mamba_depth: 2
     
@@ -73,16 +113,25 @@ heads:
 # TRAINING CONFIGURATION
 # =============================================================================
 training:
-  epochs: 100
+  epochs: 150
   batch_size: 8
   learning_rate: 1e-4
   weight_decay: 1e-5
   optimizer: "adamw"
-  scheduler: "reduce_plateau"  # "cosine", "reduce_plateau"
-  early_stop: 20
+  scheduler: "cosine"  # "cosine", "reduce_plateau"
+  early_stop: 30
   
   # Gradient clipping
   grad_clip: 1.0
+  
+  # SOTA Strategies
+  sota:
+    boundary_loss: true
+    boundary_weight: 0.5
+    warmup_epochs: 10
+    deep_supervision: false
+    tta_eval: false
+    tta_test: true
   
   # Augmentation
   augmentation:
@@ -95,10 +144,10 @@ training:
 # =============================================================================
 loss:
   ce_weight: 1.0
-  dice_weight: 0.5
+  dice_weight: 1.0
   focal_weight: 0.0
   focal_gamma: 2.0
-  boundary_weight: 0.0
+  boundary_weight: 0.5
 
 # =============================================================================
 # DATA CONFIGURATION
@@ -113,26 +162,36 @@ data:
 # PRESETS REFERENCE
 # =============================================================================
 # baseline:
+#   - block.type: "none"
 #   - retinal.enabled: false
-#   - components.use_mamba: false, use_spectral: false
 #   - heads.coarse.type: "linear"
 #   - heads.fine.enabled: false
 #
 # lite:
+#   - block.type: "inverted_residual"
 #   - retinal.enabled: false
-#   - components.use_mamba: false, use_spectral: false
 #   - heads.coarse.type: "constellation"
 #   - heads.fine.enabled: false
 #
 # sota:
+#   - block.type: "convnext"
 #   - retinal.enabled: false
-#   - components.use_mamba: true, use_spectral: true
 #   - heads.coarse.type: "constellation"
 #   - heads.fine.type: "gabor"
 #
 # bio:
-#   - retinal.enabled: true
-#   - components.use_mamba: false, use_spectral: false
+#   - block.type: "convnext"
+#   - retinal.enabled: true (DoG)
 #   - heads.coarse.type: "constellation"
 #   - heads.fine.type: "shearlet"
+#
+# spectral:
+#   - block.type: "fno"
+#   - retinal.enabled: true
+#   - heads.fine.type: "shearlet"
+#
+# attention:
+#   - block.type: "swin"
+#   - retinal.enabled: true
+#   - heads.fine.type: "gabor"
 # =============================================================================
