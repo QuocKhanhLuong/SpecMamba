@@ -6,16 +6,24 @@ echo "========================================"
 echo "Block Benchmark - Pure HRNet"  
 echo "========================================"
 
-cd "$(dirname "$0")/../.."
+# Navigate to project root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT"
 
-# Cài đặt
-EPOCHS=200
+echo "Working dir: $(pwd)"
+
+# Config
+EPOCHS=10
 BATCH_SIZE=8
 LR=0.0001
 DATA_DIR="preprocessed_data/ACDC"
 
+# Add src to PYTHONPATH
+export PYTHONPATH="$PROJECT_ROOT/src:$PYTHONPATH"
+
 # Chạy benchmark
-python -m src.training.benchmark_blocks \
+python src/training/benchmark_blocks.py \
     --data_dir $DATA_DIR \
     --epochs $EPOCHS \
     --batch_size $BATCH_SIZE \
