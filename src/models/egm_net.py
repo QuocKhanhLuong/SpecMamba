@@ -17,12 +17,16 @@ try:
     from models.hrnet_mamba import HRNetV2MambaBackbone
     from layers.constellation_head import RBFConstellationHead
     from layers.gabor_implicit import EnergyGatedImplicitHead, GaborNet, ImplicitSegmentationHead
+    from layers.dog_retinal import RetinalLayer, DoGFilter
+    from layers.shearlet_implicit import ShearletImplicitHead
     from models.mamba_block import VSSBlock, MambaBlockStack
 except ImportError:
     from ..layers.monogenic import EnergyMap, MonogenicSignal
     from .hrnet_mamba import HRNetV2MambaBackbone
     from ..layers.constellation_head import RBFConstellationHead
     from ..layers.gabor_implicit import EnergyGatedImplicitHead, GaborNet, ImplicitSegmentationHead
+    from ..layers.dog_retinal import RetinalLayer, DoGFilter
+    from ..layers.shearlet_implicit import ShearletImplicitHead
     from .mamba_block import VSSBlock, MambaBlockStack
 
 
@@ -62,7 +66,10 @@ class EGMNet(nn.Module):
                  coarse_head_type: str = "constellation",
                  fusion_type: str = "energy_gated",
                  implicit_hidden: int = 256, implicit_layers: int = 4,
-                 num_frequencies: int = 64):
+                 num_frequencies: int = 64,
+                 use_dog: bool = False,
+                 dog_scales: list = None,
+                 fine_head_type: str = "gabor"):
         super().__init__()
 
         self.in_channels = in_channels
@@ -72,12 +79,28 @@ class EGMNet(nn.Module):
         self.use_fine_head = use_fine_head
         self.coarse_head_type = coarse_head_type
         self.fusion_type = fusion_type
+        self.use_dog = use_dog
+        self.use_mamba = use_mamba
+        self.use_spectral = use_spectral
+        self.fine_head_type = fine_head_type
 
         self.energy_extractor = EnergyMap(normalize=True, smoothing_sigma=1.0)
 
+        if use_dog:
+            dog_scales = dog_scales or [(1.0, 2.0), (2.0, 4.0)]
+            self.dog_layer = RetinalLayer(
+                in_channels=in_channels,
+                scales=dog_scales,
+                concat_original=True
+            )
+            backbone_in = self.dog_layer.out_channels
+        else:
+            self.dog_layer = None
+            backbone_in = in_channels
+
         if use_hrnet:
             self.backbone = HRNetV2MambaBackbone(
-                in_channels=in_channels,
+                in_channels=backbone_in,
                 base_channels=base_channels,
                 num_stages=num_stages,
                 blocks_per_stage=2,
@@ -115,13 +138,22 @@ class EGMNet(nn.Module):
             )
 
         if use_fine_head:
-            self.fine_head = EnergyGatedImplicitHead(
-                feature_channels=backbone_channels,
-                num_classes=num_classes,
-                hidden_dim=implicit_hidden,
-                num_layers=implicit_layers,
-                num_frequencies=num_frequencies
-            )
+            if fine_head_type == "shearlet":
+                self.fine_head = ShearletImplicitHead(
+                    feature_dim=backbone_channels,
+                    num_classes=num_classes,
+                    hidden_dim=implicit_hidden,
+                    num_orientations=8,
+                    num_frequencies=4
+                )
+            else:
+                self.fine_head = EnergyGatedImplicitHead(
+                    feature_channels=backbone_channels,
+                    num_classes=num_classes,
+                    hidden_dim=implicit_hidden,
+                    num_layers=implicit_layers,
+                    num_frequencies=num_frequencies
+                )
         else:
             self.fine_head = None
 
@@ -167,6 +199,9 @@ class EGMNet(nn.Module):
         else:
 
             energy, _ = self._compute_energy(x)
+
+        if self.dog_layer is not None:
+            x = self.dog_layer(x)
 
         if self.use_hrnet:
             backbone_out = self.backbone(x)
