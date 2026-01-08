@@ -374,9 +374,9 @@ class EGMNetTrainer:
         return checkpoint['epoch']
 
 def create_dummy_dataset(num_samples: int = 100, img_size: int = 256,
-                        num_classes: int = 3) -> TensorDataset:
+                        num_classes: int = 3, in_channels: int = 3) -> TensorDataset:
 
-    images = torch.randn(num_samples, 1, img_size, img_size)
+    images = torch.randn(num_samples, in_channels, img_size, img_size)
     masks = torch.randint(0, num_classes, (num_samples, img_size, img_size))
     return TensorDataset(images, masks)
 
@@ -500,20 +500,33 @@ def main():
         dataset = create_dummy_dataset(
             num_samples=32,
             img_size=args.img_size,
-            num_classes=args.num_classes
+            num_classes=args.num_classes,
+            in_channels=args.in_channels
         )
         train_loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
         config['num_epochs'] = 3
     else:
-
         print(f"\nLoading data from {args.data_dir}")
-
-        dataset = create_dummy_dataset(
-            num_samples=100,
-            img_size=args.img_size,
-            num_classes=args.num_classes
+        
+        from data.acdc_dataset import ACDCDataset2D
+        from sklearn.model_selection import train_test_split
+        import glob
+        import os
+        
+        train_dir = os.path.join(args.data_dir, 'training')
+        
+        dataset = ACDCDataset2D(train_dir, use_memmap=True, in_channels=args.in_channels)
+        
+        num_vols = len(dataset.vol_paths) if hasattr(dataset, 'vol_paths') else len(dataset)
+        train_size = int(num_vols * 0.8)
+        val_size = num_vols - train_size
+        
+        train_ds, val_ds = torch.utils.data.random_split(
+            dataset, [train_size, val_size], 
+            generator=torch.Generator().manual_seed(42)
         )
-        train_loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
+        
+        train_loader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True, num_workers=0)
 
     print("\nInitializing trainer...")
     trainer = EGMNetTrainer(model, config, device=device)
