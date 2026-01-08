@@ -76,25 +76,24 @@ class ConvNeXtBlock(nn.Module):
 
 
 class DeformableConvBlock(nn.Module):
-    """Deformable Convolution v2 Block (Corrected)"""
+    """Deformable Convolution v2 Block (Hardened Version)"""
     def __init__(self, dim, kernel_size=3):
         super().__init__()
         self.kernel_size = kernel_size
         self.padding = kernel_size // 2
         
-        # 1. Offset Generator
+        # Output channel = 2 * k * k (dx, dy cho mỗi điểm kernel)
         self.offset_conv = nn.Conv2d(
             dim, 2 * kernel_size * kernel_size, 
             kernel_size=kernel_size, padding=self.padding
         )
         
-        # 2. Modulator/Mask Generator
+        # Modulator output channel = k * k
         self.modulator_conv = nn.Conv2d(
             dim, kernel_size * kernel_size,
             kernel_size=kernel_size, padding=self.padding
         )
         
-        # 3. Regular Conv Weights (container)
         self.regular_conv = nn.Conv2d(
             dim, dim, kernel_size=kernel_size, padding=self.padding, bias=True
         )
@@ -102,16 +101,23 @@ class DeformableConvBlock(nn.Module):
         self.norm = nn.BatchNorm2d(dim)
         self.act = nn.GELU()
         
-        # Init weights to act like standard conv initially
+        # Init weights
         nn.init.zeros_(self.offset_conv.weight)
         nn.init.zeros_(self.offset_conv.bias)
         nn.init.zeros_(self.modulator_conv.weight)
-        nn.init.zeros_(self.modulator_conv.bias) # Sigmoid(0) = 0.5 -> safe start
+        # Init bias -2.0 để sigmoid ra giá trị nhỏ lúc đầu (~0.1), giúp training êm hơn
+        nn.init.constant_(self.modulator_conv.bias, -2.0) 
 
     def forward(self, x):
-        offset = self.offset_conv(x)
+        # 1. Offset bounded by tanh (Safety Clamp)
+        # Giới hạn offset trong khoảng [-kernel_size, kernel_size]
+        # Giúp kernel không bị văng ra quá xa khỏi vùng quan tâm
+        offset = torch.tanh(self.offset_conv(x)) * self.kernel_size 
+        
+        # 2. Modulator
         modulator = torch.sigmoid(self.modulator_conv(x))
         
+        # 3. Ops
         out = torchvision.ops.deform_conv2d(
             input=x, 
             offset=offset, 
@@ -295,14 +301,20 @@ def window_reverse(windows, window_size, H, W):
 # =============================================================================
 
 class FourierNeuralOperatorBlock(nn.Module):
-    """Fourier Neural Operator (FNO) Block"""
+    """Fourier Neural Operator (FNO) Block (Better Init)"""
     def __init__(self, dim, modes=16, mlp_ratio=2.):
         super().__init__()
         self.dim = dim
         self.modes = modes
         
-        self.scale = 1 / (dim * dim)
-        self.weights = nn.Parameter(self.scale * torch.randn(dim, dim, modes, modes, 2))
+        # Complex weights: (in, out, modes1, modes2)
+        # Shape thực tế trong pytorch view_as_complex là (dim, dim, modes, modes, 2)
+        self.weights = nn.Parameter(torch.empty(dim, dim, modes, modes, 2))
+        
+        # Kaiming/Xavier Initialization cho số phức
+        # Scale = 1 / sqrt(in_channels * modes * modes)
+        scale = (1 / (dim * modes * modes))
+        nn.init.normal_(self.weights, std=scale)
         
         self.norm = nn.LayerNorm(dim)
         mlp_hidden = int(dim * mlp_ratio)
@@ -319,12 +331,17 @@ class FourierNeuralOperatorBlock(nn.Module):
         x_ft = torch.fft.rfft2(x, norm='ortho')
         out_ft = torch.zeros_like(x_ft)
         
-        # Truncate modes to avoid index error if image is small
+        # Dynamic shape handling
         m1 = min(self.modes, H // 2 + 1)
         m2 = min(self.modes, W // 2 + 1)
         
-        weights = torch.view_as_complex(self.weights[:, :, :m1, :m2, :])
-        out_ft[:, :, :m1, :m2] = torch.einsum('bixy,ioxy->boxy', x_ft[:, :, :m1, :m2], weights)
+        # Complex multiplication
+        weights = torch.view_as_complex(self.weights)
+        # Slice weights đúng kích thước (nếu ảnh nhỏ hơn modes)
+        w_curr = weights[:, :, :m1, :m2]
+        
+        # Einstein summation: batch, in, x, y -> batch, out, x, y
+        out_ft[:, :, :m1, :m2] = torch.einsum('bixy,ioxy->boxy', x_ft[:, :, :m1, :m2], w_curr)
         
         x = torch.fft.irfft2(out_ft, s=(H, W), norm='ortho')
         x = shortcut + x
