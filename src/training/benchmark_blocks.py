@@ -146,6 +146,7 @@ def train_one_config(block_type, train_loader, val_loader, device, epochs=20, lr
     
     best_dice = 0
     best_metrics = None
+    best_model_state = None
     
     for epoch in range(epochs):
         model.train()
@@ -178,10 +179,18 @@ def train_one_config(block_type, train_loader, val_loader, device, epochs=20, lr
         if metrics['mean_dice'] > best_dice:
             best_dice = metrics['mean_dice']
             best_metrics = metrics.copy()
+            best_model_state = model.state_dict().copy()
         
         # Per-epoch summary
         print(f"  E{epoch+1}: Loss={train_loss/max(valid_batches,1):.4f} | "
               f"Dice={metrics['mean_dice']:.4f} | IoU={metrics['mean_iou']:.4f}")
+    
+    # Save best weights
+    if best_metrics and best_model_state:
+        save_path = f"weights/benchmark_{block_type}_best.pt"
+        os.makedirs("weights", exist_ok=True)
+        torch.save(best_model_state, save_path)
+        print(f"  ✓ Saved: {save_path}")
     
     # Print final per-class metrics
     if best_metrics:

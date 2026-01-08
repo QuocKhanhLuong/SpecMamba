@@ -129,7 +129,7 @@ training:
     boundary_loss: true
     boundary_weight: 0.5
     warmup_epochs: 10
-    deep_supervision: false
+    deep_supervision: true
     tta_eval: false
     tta_test: true
   
