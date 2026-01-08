@@ -24,8 +24,38 @@ CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
 BLOCK_TYPES = ['none', 'convnext', 'dcn', 'inverted_residual', 'swin', 'fno', 'wavelet', 'rwkv']
 
 
+def compute_hd95(pred, target):
+    """Compute HD95 for 2D binary masks"""
+    from scipy.ndimage import distance_transform_edt
+    
+    pred_np = pred.cpu().numpy().astype(bool)
+    target_np = target.cpu().numpy().astype(bool)
+    
+    if not pred_np.any() or not target_np.any():
+        return float('inf')
+    
+    # Distance transform
+    pred_dist = distance_transform_edt(~pred_np)
+    target_dist = distance_transform_edt(~target_np)
+    
+    # Surface distances
+    pred_surface = pred_np & ~np.roll(pred_np, 1, axis=0)
+    target_surface = target_np & ~np.roll(target_np, 1, axis=0)
+    
+    if not pred_surface.any() or not target_surface.any():
+        return 0.0
+    
+    # Hausdorff distances
+    d_pred_to_target = target_dist[pred_surface]
+    d_target_to_pred = pred_dist[target_surface]
+    
+    all_distances = np.concatenate([d_pred_to_target, d_target_to_pred])
+    hd95 = np.percentile(all_distances, 95) if len(all_distances) > 0 else 0.0
+    return hd95
+
+
 def evaluate_full(model, loader, device, num_classes=4):
-    """Full evaluation with Dice, IoU, Precision, Recall per class"""
+    """Full evaluation with Dice, IoU, Precision, Recall, HD95 per class"""
     model.eval()
     
     tp = [0]*num_classes
@@ -33,6 +63,8 @@ def evaluate_full(model, loader, device, num_classes=4):
     fn = [0]*num_classes
     dice_sum = [0.]*num_classes
     iou_sum = [0.]*num_classes
+    hd95_sum = [0.]*num_classes
+    hd95_count = [0]*num_classes
     batches = 0
     
     with torch.no_grad():
@@ -52,12 +84,23 @@ def evaluate_full(model, loader, device, num_classes=4):
                 tp[c] += inter.item()
                 fp[c] += (pc.sum() - inter).item()
                 fn[c] += (tc.sum() - inter).item()
+                
+                # HD95 per sample
+                for b in range(preds.shape[0]):
+                    pred_c = (preds[b] == c)
+                    tgt_c = (tgts[b] == c)
+                    if pred_c.any() and tgt_c.any():
+                        hd = compute_hd95(pred_c, tgt_c)
+                        if hd != float('inf'):
+                            hd95_sum[c] += hd
+                            hd95_count[c] += 1
     
     metrics = {
         'dice': [dice_sum[c] / batches for c in range(num_classes)],
         'iou': [iou_sum[c] / batches for c in range(num_classes)],
         'precision': [tp[c] / (tp[c] + fp[c] + 1e-6) for c in range(num_classes)],
         'recall': [tp[c] / (tp[c] + fn[c] + 1e-6) for c in range(num_classes)],
+        'hd95': [hd95_sum[c] / max(hd95_count[c], 1) for c in range(num_classes)],
     }
     
     # Mean foreground (exclude BG)
@@ -65,6 +108,7 @@ def evaluate_full(model, loader, device, num_classes=4):
     metrics['mean_iou'] = np.mean(metrics['iou'][1:])
     metrics['mean_prec'] = np.mean(metrics['precision'][1:])
     metrics['mean_rec'] = np.mean(metrics['recall'][1:])
+    metrics['mean_hd95'] = np.mean(metrics['hd95'][1:])
     
     return metrics
 
@@ -142,14 +186,14 @@ def train_one_config(block_type, train_loader, val_loader, device, epochs=20, lr
     # Print final per-class metrics
     if best_metrics:
         print(f"\n  --- Best Results for {block_type.upper()} ---")
-        print(f"  {'Class':<6} {'Dice':>8} {'IoU':>8} {'Prec':>8} {'Rec':>8}")
-        print(f"  {'-'*40}")
+        print(f"  {'Class':<6} {'Dice':>8} {'IoU':>8} {'HD95':>8} {'Prec':>8} {'Rec':>8}")
+        print(f"  {'-'*55}")
         for c in range(num_classes):
             print(f"  {CLASS_MAP[c]:<6} {best_metrics['dice'][c]:>8.4f} {best_metrics['iou'][c]:>8.4f} "
-                  f"{best_metrics['precision'][c]:>8.4f} {best_metrics['recall'][c]:>8.4f}")
-        print(f"  {'-'*40}")
+                  f"{best_metrics['hd95'][c]:>8.2f} {best_metrics['precision'][c]:>8.4f} {best_metrics['recall'][c]:>8.4f}")
+        print(f"  {'-'*55}")
         print(f"  {'AvgFG':<6} {best_metrics['mean_dice']:>8.4f} {best_metrics['mean_iou']:>8.4f} "
-              f"{best_metrics['mean_prec']:>8.4f} {best_metrics['mean_rec']:>8.4f}")
+              f"{best_metrics['mean_hd95']:>8.2f} {best_metrics['mean_prec']:>8.4f} {best_metrics['mean_rec']:>8.4f}")
     
     return best_metrics, params
 
@@ -205,11 +249,11 @@ def main():
         results[block_type] = {'metrics': metrics, 'params': params}
     
     # Final Summary Table
-    print(f"\n{'='*70}")
+    print(f"\n{'='*85}")
     print("BENCHMARK RESULTS SUMMARY")
-    print(f"{'='*70}")
-    print(f"{'Block':<20} {'Params':>12} {'Dice':>8} {'IoU':>8} {'Prec':>8} {'Rec':>8}")
-    print("-"*70)
+    print(f"{'='*85}")
+    print(f"{'Block':<20} {'Params':>12} {'Dice':>8} {'IoU':>8} {'HD95':>8} {'Prec':>8} {'Rec':>8}")
+    print("-"*85)
     
     sorted_results = sorted(
         results.items(), 
@@ -221,15 +265,15 @@ def main():
         if res['metrics']:
             m = res['metrics']
             print(f"{block_type:<20} {res['params']:>12,} {m['mean_dice']:>8.4f} {m['mean_iou']:>8.4f} "
-                  f"{m['mean_prec']:>8.4f} {m['mean_rec']:>8.4f}")
+                  f"{m['mean_hd95']:>8.2f} {m['mean_prec']:>8.4f} {m['mean_rec']:>8.4f}")
         else:
-            print(f"{block_type:<20} {'FAILED':>12} {'-':>8} {'-':>8} {'-':>8} {'-':>8}")
+            print(f"{block_type:<20} {'FAILED':>12} {'-':>8} {'-':>8} {'-':>8} {'-':>8} {'-':>8}")
     
-    print("-"*70)
+    print("-"*85)
     
     if sorted_results[0][1]['metrics']:
         best = sorted_results[0]
-        print(f"\n★ Best: {best[0]} (Dice={best[1]['metrics']['mean_dice']:.4f})")
+        print(f"\n★ Best: {best[0]} (Dice={best[1]['metrics']['mean_dice']:.4f}, HD95={best[1]['metrics']['mean_hd95']:.2f})")
     
     # Save results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -237,13 +281,13 @@ def main():
     with open(result_file, 'w') as f:
         f.write(f"Block Benchmark Results - {timestamp}\n")
         f.write(f"Epochs: {args.epochs}, LR: {args.lr}\n\n")
-        f.write(f"{'Block':<20} {'Params':>12} {'Dice':>8} {'IoU':>8} {'Prec':>8} {'Rec':>8}\n")
-        f.write("-"*70 + "\n")
+        f.write(f"{'Block':<20} {'Params':>12} {'Dice':>8} {'IoU':>8} {'HD95':>8} {'Prec':>8} {'Rec':>8}\n")
+        f.write("-"*85 + "\n")
         for block_type, res in sorted_results:
             if res['metrics']:
                 m = res['metrics']
                 f.write(f"{block_type:<20} {res['params']:>12,} {m['mean_dice']:>8.4f} {m['mean_iou']:>8.4f} "
-                        f"{m['mean_prec']:>8.4f} {m['mean_rec']:>8.4f}\n")
+                        f"{m['mean_hd95']:>8.2f} {m['mean_prec']:>8.4f} {m['mean_rec']:>8.4f}\n")
             else:
                 f.write(f"{block_type:<20} FAILED\n")
     print(f"\nResults saved to: {result_file}")
