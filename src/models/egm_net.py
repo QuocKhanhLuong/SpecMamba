@@ -69,7 +69,9 @@ class EGMNet(nn.Module):
                  num_frequencies: int = 64,
                  use_dog: bool = False,
                  dog_scales: list = None,
-                 fine_head_type: str = "gabor"):
+                 fine_head_type: str = "gabor",
+                 block_type: str = "none",
+                 block_depth: int = 2):
         super().__init__()
 
         self.in_channels = in_channels
@@ -83,6 +85,8 @@ class EGMNet(nn.Module):
         self.use_mamba = use_mamba
         self.use_spectral = use_spectral
         self.fine_head_type = fine_head_type
+        self.block_type = block_type
+        self.block_depth = block_depth
 
         self.energy_extractor = EnergyMap(normalize=True, smoothing_sigma=1.0)
 
@@ -120,6 +124,16 @@ class EGMNet(nn.Module):
             backbone_channels = base_channels * (2 ** (num_stages - 1))
 
         self.backbone_channels = backbone_channels
+
+        # Optional modular block (ConvNeXt, Swin, FNO, etc.)
+        if block_type and block_type != "none":
+            try:
+                from models.blocks import BlockStack
+            except ImportError:
+                from .blocks import BlockStack
+            self.extra_blocks = BlockStack(block_type, backbone_channels, block_depth)
+        else:
+            self.extra_blocks = None
 
         if coarse_head_type == "constellation":
             self.coarse_head = RBFConstellationHead(
@@ -208,6 +222,10 @@ class EGMNet(nn.Module):
             features = backbone_out['features']
         else:
             features = self.backbone(x)
+
+        # Apply extra blocks (ConvNeXt, Swin, FNO, etc.)
+        if self.extra_blocks is not None:
+            features = self.extra_blocks(features)
 
         if self.coarse_head_type == "constellation":
             coarse_logits, embeddings = self.coarse_head(features)

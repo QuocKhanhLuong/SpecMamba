@@ -76,6 +76,12 @@ def main():
     parser.add_argument('--fine_head_type', type=str, default='shearlet', choices=['gabor', 'shearlet'])
     parser.add_argument('--early_stop', type=int, default=30)
     
+    # Block type selection (thay thế Mamba)
+    parser.add_argument('--block_type', type=str, default='convnext',
+                       choices=['convnext', 'dcn', 'inverted_residual', 'swin', 'fno', 'wavelet', 'rwkv', 'none'],
+                       help='Block type: convnext, dcn, inverted_residual, swin, fno, wavelet, rwkv, none')
+    parser.add_argument('--block_depth', type=int, default=2, help='Number of blocks per stage')
+    
     # SOTA options
     parser.add_argument('--boundary_weight', type=float, default=0.5)
     parser.add_argument('--warmup_epochs', type=int, default=10)
@@ -106,12 +112,15 @@ def main():
         use_spectral=False,
         use_fine_head=True,
         use_dog=args.use_dog,
-        fine_head_type=args.fine_head_type
+        fine_head_type=args.fine_head_type,
+        block_type=args.block_type,
+        block_depth=args.block_depth
     ).to(device)
     
     params = sum(p.numel() for p in model.parameters())
     print(f"\n--- Model ---")
     print(f"  Parameters:     {params:,}")
+    print(f"  Block Type:     {args.block_type} (depth={args.block_depth})")
     print(f"  DoG:            {'✓' if args.use_dog else '✗'}")
     print(f"  Fine Head:      {args.fine_head_type}")
     print(f"\n--- SOTA Strategies ---")
