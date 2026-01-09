@@ -172,17 +172,36 @@ class FuseLayer(nn.Module):
 
 class HRNetStage(nn.Module):
     def __init__(self, channels_list, num_blocks=4, block=BasicBlock,
-                 use_mamba=False, use_spectral=False, sizes=None):
+                 use_mamba=False, use_spectral=False, sizes=None,
+                 block_type="basic"):
+        """
+        Args:
+            block_type: "basic", "mamba", "convnext", "dcn", "swin", "fno", "wavelet", "rwkv"
+        """
         super().__init__()
         self.branches = nn.ModuleList()
 
+        # Import modular blocks if needed
+        if block_type not in ["basic", "mamba"]:
+            try:
+                from models.blocks import get_block
+            except ImportError:
+                from .blocks import get_block
+
         for idx, ch in enumerate(channels_list):
             h, w = sizes[idx] if sizes else (64, 64)
-            if use_mamba:
+            
+            if block_type == "mamba" or (block_type == "basic" and use_mamba):
+                # Original Mamba blocks
                 blocks = [MambaBlock(ch, ch, use_mamba=use_mamba, use_spectral=use_spectral, height=h, width=w)
                           for _ in range(num_blocks)]
-            else:
+            elif block_type == "basic":
+                # Original BasicBlock
                 blocks = [block(ch, ch) for _ in range(num_blocks)]
+            else:
+                # Modular blocks (ConvNeXt, DCN, Swin, FNO, Wavelet, RWKV)
+                blocks = [get_block(block_type, ch) for _ in range(num_blocks)]
+            
             self.branches.append(nn.Sequential(*blocks))
 
         self.fuse = FuseLayer(channels_list, channels_list)
@@ -195,8 +214,14 @@ class HRNetStage(nn.Module):
 class HRNetV2MambaBackbone(nn.Module):
     def __init__(self, in_channels=3, base_channels=32, num_stages=4,
                  blocks_per_stage=4, use_mamba=True, use_spectral=True,
-                 img_size=256, mamba_depth=2):
+                 img_size=224, mamba_depth=2, block_type="basic"):
+        """
+        Args:
+            block_type: "basic", "mamba", "convnext", "dcn", "swin", "fno", "wavelet", "rwkv"
+        """
         super().__init__()
+        
+        self.block_type = block_type
 
         self.stem = HRNetStem(in_channels, 64)
 
@@ -217,7 +242,8 @@ class HRNetV2MambaBackbone(nn.Module):
 
         s = img_size // 4
         self.stage2 = HRNetStage([C, C*2], blocks_per_stage, BasicBlock,
-                                  use_mamba, use_spectral, [(s, s), (s//2, s//2)])
+                                  use_mamba, use_spectral, [(s, s), (s//2, s//2)],
+                                  block_type=block_type)
 
         self.transition2 = nn.ModuleList([
             nn.Identity(),
@@ -226,7 +252,8 @@ class HRNetV2MambaBackbone(nn.Module):
         ])
 
         self.stage3 = HRNetStage([C, C*2, C*4], blocks_per_stage, BasicBlock,
-                                  use_mamba, use_spectral, [(s, s), (s//2, s//2), (s//4, s//4)])
+                                  use_mamba, use_spectral, [(s, s), (s//2, s//2), (s//4, s//4)],
+                                  block_type=block_type)
 
         self.transition3 = nn.ModuleList([
             nn.Identity(),
@@ -236,7 +263,8 @@ class HRNetV2MambaBackbone(nn.Module):
         ])
 
         self.stage4 = HRNetStage([C, C*2, C*4, C*8], blocks_per_stage, BasicBlock,
-                                  use_mamba, use_spectral, [(s, s), (s//2, s//2), (s//4, s//4), (s//8, s//8)])
+                                  use_mamba, use_spectral, [(s, s), (s//2, s//2), (s//4, s//4), (s//8, s//8)],
+                                  block_type=block_type)
 
         self.out_channels = C + C*2 + C*4 + C*8
         self.feature_size = s

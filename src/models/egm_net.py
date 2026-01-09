@@ -111,7 +111,8 @@ class EGMNet(nn.Module):
                 mamba_depth=2 if use_mamba else 0,
                 img_size=img_size,
                 use_mamba=use_mamba,
-                use_spectral=use_spectral
+                use_spectral=use_spectral,
+                block_type=block_type
             )
             backbone_channels = self.backbone.out_channels
         else:
@@ -124,16 +125,9 @@ class EGMNet(nn.Module):
             backbone_channels = base_channels * (2 ** (num_stages - 1))
 
         self.backbone_channels = backbone_channels
-
-        # Optional modular block (ConvNeXt, Swin, FNO, etc.)
-        if block_type and block_type != "none":
-            try:
-                from models.blocks import BlockStack
-            except ImportError:
-                from .blocks import BlockStack
-            self.extra_blocks = BlockStack(block_type, backbone_channels, block_depth)
-        else:
-            self.extra_blocks = None
+        
+        # Note: block_type is now passed to HRNet stages, not as extra blocks
+        self.extra_blocks = None
 
         if coarse_head_type == "constellation":
             self.coarse_head = RBFConstellationHead(

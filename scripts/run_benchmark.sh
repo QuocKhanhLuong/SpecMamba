@@ -28,7 +28,7 @@ python src/training/benchmark_blocks.py \
     --epochs $EPOCHS \
     --batch_size $BATCH_SIZE \
     --lr $LR \
-    --blocks none convnext dcn inverted_residual swin fno wavelet
+    --blocks basic convnext dcn inverted_residual swin fno wavelet rwkv
 
 echo ""
 echo "✓ Benchmark completed!"

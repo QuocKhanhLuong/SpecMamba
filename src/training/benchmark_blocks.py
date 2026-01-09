@@ -21,7 +21,7 @@ from data.acdc_dataset import ACDCDataset2D
 
 
 CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
-BLOCK_TYPES = ['none', 'convnext', 'dcn', 'inverted_residual', 'swin', 'fno', 'wavelet', 'rwkv']
+BLOCK_TYPES = ['basic', 'convnext', 'dcn', 'inverted_residual', 'swin', 'fno', 'wavelet', 'rwkv']
 
 
 def compute_hd95(pred, target):
@@ -131,8 +131,7 @@ def train_one_config(block_type, train_loader, val_loader, device, epochs=20, lr
             use_fine_head=False,
             use_dog=False,
             coarse_head_type="linear",
-            block_type=block_type,
-            block_depth=2
+            block_type=block_type
         ).to(device)
     except Exception as e:
         print(f"  ✗ Failed to create model: {e}")
