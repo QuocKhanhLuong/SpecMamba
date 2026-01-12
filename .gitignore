@@ -101,8 +101,10 @@ logs/
 tensorboard/
 
 # Weights & outputs
+weights/
 outputs/
 results/
+*.txt
 
 # Temporary files
 tmp/
