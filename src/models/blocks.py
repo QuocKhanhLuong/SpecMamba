@@ -479,7 +479,25 @@ class RWKVBlock(nn.Module):
 
 def get_block(block_type: str, dim: int, **kwargs):
     """Factory function to get block by name"""
+    
+    # BasicBlock wrapper (simple conv residual)
+    class BasicBlock(nn.Module):
+        def __init__(self, dim):
+            super().__init__()
+            self.conv1 = nn.Conv2d(dim, dim, 3, 1, 1, bias=False)
+            self.bn1 = nn.BatchNorm2d(dim)
+            self.conv2 = nn.Conv2d(dim, dim, 3, 1, 1, bias=False)
+            self.bn2 = nn.BatchNorm2d(dim)
+            self.relu = nn.ReLU(inplace=True)
+        
+        def forward(self, x):
+            residual = x
+            out = self.relu(self.bn1(self.conv1(x)))
+            out = self.bn2(self.conv2(out))
+            return self.relu(out + residual)
+    
     blocks = {
+        'basic': BasicBlock,
         'convnext': ConvNeXtBlock,
         'dcn': DeformableConvBlock,
         'inverted_residual': InvertedResidualBlock,
