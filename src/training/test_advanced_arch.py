@@ -506,7 +506,7 @@ CONFIGS = {
         ],
         'use_pointrend': True,
         'full_resolution_mode': True,
-        'base_channels': 16  
+        'base_channels': 48  
     },
 }
 
