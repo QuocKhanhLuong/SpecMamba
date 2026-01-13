@@ -1,5 +1,4 @@
 """
-ACDC SOTA Training Script
 - Boundary Loss with warmup
 - Deep Supervision
 - TTA for evaluation

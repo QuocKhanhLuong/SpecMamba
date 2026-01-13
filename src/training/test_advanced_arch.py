@@ -294,19 +294,17 @@ def evaluate(model, loader, device, num_classes=4):
 
 def evaluate_3d(model, dataset, device, num_classes=4):
     """
-    3D Volumetric Evaluation - Groups slices by volume and computes 3D metrics.
-    More accurate than 2D slice-by-slice evaluation.
+    3D Volumetric Evaluation - Accurate medical imaging metrics.
+    Uses binary_erosion for proper surface detection.
     """
     from collections import defaultdict
-    from scipy.ndimage import distance_transform_edt
+    from scipy.ndimage import distance_transform_edt, binary_erosion
     
     model.eval()
     
     # Group predictions by volume
-    vol_preds = defaultdict(list)  # vol_idx -> list of (slice_idx, pred, target)
+    vol_preds = defaultdict(list)
     vol_targets = defaultdict(list)
-    
-    print("\n[3D Eval] Collecting predictions by volume...")
     
     with torch.no_grad():
         for i in range(len(dataset)):
@@ -322,19 +320,14 @@ def evaluate_3d(model, dataset, device, num_classes=4):
             vol_preds[vol_idx].append((slice_idx, pred))
             vol_targets[vol_idx].append((slice_idx, target_np))
     
-    # Sort slices and stack into 3D volumes
     dice_3d = {c: [] for c in range(1, num_classes)}
     hd95_3d = {c: [] for c in range(1, num_classes)}
     
-    print(f"[3D Eval] Computing 3D metrics for {len(vol_preds)} volumes...")
-    
     for vol_idx in vol_preds.keys():
-        # Sort by slice index
         preds_sorted = sorted(vol_preds[vol_idx], key=lambda x: x[0])
         targets_sorted = sorted(vol_targets[vol_idx], key=lambda x: x[0])
         
-        # Stack into 3D volume
-        pred_3d = np.stack([p[1] for p in preds_sorted], axis=0)  # (D, H, W)
+        pred_3d = np.stack([p[1] for p in preds_sorted], axis=0)
         target_3d = np.stack([t[1] for t in targets_sorted], axis=0)
         
         for c in range(1, num_classes):
@@ -343,38 +336,40 @@ def evaluate_3d(model, dataset, device, num_classes=4):
             
             # 3D Dice
             inter = (pred_c & target_c).sum()
-            dice = (2 * inter) / (pred_c.sum() + target_c.sum() + 1e-6)
+            union = pred_c.sum() + target_c.sum()
+            dice = (2 * inter) / (union + 1e-6)
             dice_3d[c].append(dice)
             
-            # 3D HD95
+            # 3D HD95 with proper surface detection
             if pred_c.any() and target_c.any():
                 pred_dist = distance_transform_edt(~pred_c)
                 target_dist = distance_transform_edt(~target_c)
                 
-                # Surface distances
-                pred_border = pred_c ^ np.roll(pred_c, 1, axis=1)  # XY boundary
-                target_border = target_c ^ np.roll(target_c, 1, axis=1)
+                # Surface = Mask XOR Erode(Mask) for accurate boundary
+                pred_border = pred_c ^ binary_erosion(pred_c)
+                target_border = target_c ^ binary_erosion(target_c)
                 
                 if pred_border.any() and target_border.any():
                     d1 = target_dist[pred_border]
                     d2 = pred_dist[target_border]
                     all_d = np.concatenate([d1, d2])
                     hd95_3d[c].append(np.percentile(all_d, 95))
+                else:
+                    hd95_3d[c].append(0.0)
+            elif not pred_c.any() and not target_c.any():
+                hd95_3d[c].append(0.0)  # Both empty = good
+            else:
+                hd95_3d[c].append(100.0)  # Penalty for missing/hallucination
     
-    # Aggregate
-    results = {
-        'mean_dice_3d': np.mean([np.mean(dice_3d[c]) for c in range(1, num_classes)]),
-        'per_class_dice_3d': {c: np.mean(dice_3d[c]) for c in range(1, num_classes)},
-        'mean_hd95_3d': np.mean([np.mean(hd95_3d[c]) if hd95_3d[c] else float('inf') for c in range(1, num_classes)]),
-        'per_class_hd95_3d': {c: np.mean(hd95_3d[c]) if hd95_3d[c] else float('inf') for c in range(1, num_classes)},
-        'num_volumes': len(vol_preds)
+    # Return with keys compatible with train_config
+    mean_dice = np.mean([np.mean(dice_3d[c]) for c in range(1, num_classes)])
+    mean_hd95 = np.mean([np.mean(hd95_3d[c]) for c in range(1, num_classes)])
+    
+    return {
+        'mean_dice': mean_dice,
+        'mean_hd95': mean_hd95,
+        'per_class_dice': {c: np.mean(dice_3d[c]) for c in range(1, num_classes)}
     }
-    
-    print(f"[3D Eval] Volumes: {results['num_volumes']}")
-    print(f"[3D Eval] 3D Dice: {results['mean_dice_3d']:.4f}")
-    print(f"[3D Eval] 3D HD95: {results['mean_hd95_3d']:.2f}")
-    
-    return results
 
 
 def train_config(name, model, train_loader, val_loader, device, epochs=50, lr=1e-4):
@@ -421,7 +416,8 @@ def train_config(name, model, train_loader, val_loader, device, epochs=50, lr=1e
             train_loss += loss.item()
             valid_batches += 1
         
-        metrics = evaluate(model, val_loader, device)
+        # 3D Volumetric Evaluation
+        metrics = evaluate_3d(model, val_loader.dataset, device)
         
         if metrics['mean_dice'] > best_dice:
             best_dice = metrics['mean_dice']
@@ -429,7 +425,7 @@ def train_config(name, model, train_loader, val_loader, device, epochs=50, lr=1e
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         
         print(f"  E{epoch+1}: Loss={train_loss/max(valid_batches,1):.4f} | "
-              f"Dice={metrics['mean_dice']:.4f} | HD95={metrics['mean_hd95']:.2f}")
+              f"3D Dice={metrics['mean_dice']:.4f} | 3D HD95={metrics['mean_hd95']:.2f}")
     
     # Save best
     os.makedirs("weights", exist_ok=True)
@@ -439,10 +435,6 @@ def train_config(name, model, train_loader, val_loader, device, epochs=50, lr=1e
     
     return best_metrics, params
 
-
-# =============================================================================
-# CONFIGURATIONS
-# =============================================================================
 
 CONFIGS = {
     # Baseline: BasicBlock
@@ -492,7 +484,7 @@ CONFIGS = {
             {'blocks': ['inverted_residual', 'dcn', 'inverted_residual', 'dcn']},
             {'blocks': ['inverted_residual', 'dcn', 'inverted_residual', 'dcn', 'inverted_residual', 'dcn']},
         ],
-        'use_pointrend': False
+        'use_pointrend': True
     },
     
     # IDEA 2 + PointRend
@@ -509,12 +501,12 @@ CONFIGS = {
     "Full Res DCN + PointRend": {
         'stage_configs': [
             {'blocks': ['dcn'] * 2},
-            {'blocks': ['dcn'] * 2},
-            {'blocks': ['dcn'] * 2},
+            {'blocks': ['dcn'] * 4},
+            {'blocks': ['dcn'] * 6},
         ],
         'use_pointrend': True,
         'full_resolution_mode': True,
-        'base_channels': 16  # Reduced to fit in VRAM
+        'base_channels': 16  
     },
 }
 
@@ -582,7 +574,7 @@ def main():
         try:
             # Get config-specific overrides
             base_ch = cfg.get('base_channels', 64)
-            full_res = cfg.get('full_resolution_mode', False)
+            full_res = cfg.get('full_resolution_mode', True)
             
             model = HRNetAdvanced(
                 in_channels=3,
