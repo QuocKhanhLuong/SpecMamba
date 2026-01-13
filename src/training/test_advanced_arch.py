@@ -335,8 +335,8 @@ CONFIGS = {
     "Asymmetric DCN (2-3-4)": {
         'stage_configs': [
             {'blocks': ['dcn'] * 2},
-            {'blocks': ['dcn'] * 3},
             {'blocks': ['dcn'] * 4},
+            {'blocks': ['dcn'] * 6},
         ],
         'use_pointrend': False
     },
@@ -345,8 +345,8 @@ CONFIGS = {
     "Asymmetric DCN + PointRend": {
         'stage_configs': [
             {'blocks': ['dcn'] * 2},
-            {'blocks': ['dcn'] * 3},
             {'blocks': ['dcn'] * 4},
+            {'blocks': ['dcn'] * 6},
         ],
         'use_pointrend': True
     },
@@ -356,7 +356,7 @@ CONFIGS = {
         'stage_configs': [
             {'blocks': ['inverted_residual', 'dcn']},
             {'blocks': ['inverted_residual', 'dcn', 'inverted_residual', 'dcn']},
-            {'blocks': ['inverted_residual', 'dcn', 'inverted_residual', 'dcn']},
+            {'blocks': ['inverted_residual', 'dcn', 'inverted_residual', 'dcn', 'inverted_residual', 'dcn']},
         ],
         'use_pointrend': False
     },
@@ -366,7 +366,7 @@ CONFIGS = {
         'stage_configs': [
             {'blocks': ['inverted_residual', 'dcn']},
             {'blocks': ['inverted_residual', 'dcn', 'inverted_residual', 'dcn']},
-            {'blocks': ['inverted_residual', 'dcn', 'inverted_residual', 'dcn']},
+            {'blocks': ['inverted_residual', 'dcn', 'inverted_residual', 'dcn', 'inverted_residual', 'dcn']},
         ],
         'use_pointrend': True
     },
@@ -427,7 +427,7 @@ def main():
         try:
             model = HRNetAdvanced(
                 in_channels=3,
-                base_channels=32,
+                base_channels=64,  
                 img_size=224,
                 stage_configs=cfg['stage_configs'],
                 use_pointrend=cfg['use_pointrend'],
