@@ -219,10 +219,17 @@ def evaluate(model, loader, device, num_classes=4):
     hd95_sum = [0.]*num_classes
     hd95_count = [0]*num_classes
     batches = 0
+    first_eval_logged = False  # [LOGGING]
     
     with torch.no_grad():
         for imgs, tgts in loader:
             imgs, tgts = imgs.to(device), tgts.to(device)
+            
+            # [LOGGING] First batch info
+            if not first_eval_logged:
+                print(f"\n[Eval] Batch Shape: {imgs.shape} -> 2D SLICE EVALUATION")
+                first_eval_logged = True
+            
             out = model(imgs)['output']
             preds = out.argmax(1)
             batches += 1
@@ -265,6 +272,7 @@ def train_config(name, model, train_loader, val_loader, device, epochs=50, lr=1e
     best_dice = 0
     best_metrics = None
     best_state = None
+    first_batch_logged = False  # [LOGGING]
     
     for epoch in range(epochs):
         model.train()
@@ -273,6 +281,13 @@ def train_config(name, model, train_loader, val_loader, device, epochs=50, lr=1e
         
         for imgs, masks in tqdm(train_loader, desc=f"E{epoch+1}", leave=False):
             imgs, masks = imgs.to(device), masks.to(device)
+            
+            # [LOGGING] First batch info
+            if not first_batch_logged:
+                print(f"\n[Train] Input: {imgs.shape} -> 2D SLICE TRAINING")
+                print(f"[Train] Target: {masks.shape}")
+                first_batch_logged = True
+            
             optimizer.zero_grad()
             
             out = model(imgs)['output']
@@ -395,6 +410,12 @@ def main():
     train_dir = os.path.join(args.data_dir, 'training')
     train_dataset = ACDCDataset2D(train_dir, in_channels=3)
     
+    # [LOGGING] Dataset info
+    print(f"\n[Data] Source: {train_dir}")
+    print(f"[Data] Mode: SLICE-BY-SLICE (2D)")
+    print(f"[Data] Total 3D Volumes: {len(train_dataset.vol_paths)}")
+    print(f"[Data] Total 2D Slices: {len(train_dataset)}")
+    
     num_vols = len(train_dataset.vol_paths)
     vol_indices = list(range(num_vols))
     np.random.seed(42)
@@ -412,7 +433,10 @@ def main():
     train_loader = DataLoader(train_ds, args.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, args.batch_size, shuffle=False, num_workers=0)
     
-    print(f"Train: {len(train_ds)} slices, Val: {len(val_ds)} slices")
+    # [LOGGING] Split info
+    print(f"\n[Split] Train: {len(train_vols)} volumes -> {len(train_ds)} slices")
+    print(f"[Split] Val: {len(val_vols)} volumes -> {len(val_ds)} slices")
+    print(f"[Loader] Batch size: {args.batch_size}")
     
     # Select configs
     configs_to_test = CONFIGS
