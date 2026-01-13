@@ -8,7 +8,12 @@ Phân tích chi tiết lỗi segmentation để xác định nguyên nhân:
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+
+# Add src to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+src_dir = os.path.join(project_root, 'src')
+sys.path.insert(0, src_dir)
 
 import torch
 import numpy as np
