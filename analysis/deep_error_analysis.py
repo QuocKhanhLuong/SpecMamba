@@ -200,27 +200,52 @@ def analyze(args):
     # Load Model
     print(f">>> Loading model from: {args.checkpoint}")
     
-    # Infer config from checkpoint name
+    # Infer config from checkpoint
     use_pointrend = 'pointrend' in args.checkpoint.lower()
+    
+    # Try to detect block counts from checkpoint keys
+    stage2_depth = args.stage2_blocks
+    stage3_depth = args.stage3_blocks  
+    stage4_depth = args.stage4_blocks
+    
+    if os.path.exists(args.checkpoint):
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        
+        # Auto-detect block counts from checkpoint keys
+        max_s2, max_s3, max_s4 = 0, 0, 0
+        for key in checkpoint.keys():
+            if key.startswith('stage2.branches.0.'):
+                idx = int(key.split('.')[2]) + 1 if key.split('.')[2].isdigit() else 0
+                max_s2 = max(max_s2, int(key.split('.')[3]) + 1) if key.split('.')[3].isdigit() else max_s2
+            elif key.startswith('stage3.branches.0.'):
+                max_s3 = max(max_s3, int(key.split('.')[3]) + 1) if key.split('.')[3].isdigit() else max_s3
+            elif key.startswith('stage4.branches.0.'):
+                max_s4 = max(max_s4, int(key.split('.')[3]) + 1) if key.split('.')[3].isdigit() else max_s4
+        
+        if max_s2 > 0: stage2_depth = max_s2
+        if max_s3 > 0: stage3_depth = max_s3
+        if max_s4 > 0: stage4_depth = max_s4
+        
+        print(f">>> Detected config: stage2={stage2_depth}, stage3={stage3_depth}, stage4={stage4_depth}")
+    else:
+        checkpoint = None
+        print(f">>> WARNING: Checkpoint not found, using random weights!")
     
     model = HRNetAdvanced(
         in_channels=3,
         base_channels=64,
         num_classes=4,
         stage_configs=[
-            {'blocks': ['dcn'] * 2},
-            {'blocks': ['dcn'] * 3},
-            {'blocks': ['dcn'] * 4}
+            {'blocks': ['dcn'] * stage2_depth},
+            {'blocks': ['dcn'] * stage3_depth},
+            {'blocks': ['dcn'] * stage4_depth}
         ],
         use_pointrend=use_pointrend
     ).to(device)
     
-    if os.path.exists(args.checkpoint):
-        checkpoint = torch.load(args.checkpoint, map_location=device)
-        model.load_state_dict(checkpoint)
+    if checkpoint:
+        model.load_state_dict(checkpoint, strict=False)
         print(">>> Checkpoint loaded successfully!")
-    else:
-        print(f">>> WARNING: Checkpoint not found, using random weights!")
     
     model.eval()
     
@@ -363,6 +388,9 @@ def main():
     parser.add_argument('--data_dir', type=str, default='preprocessed_data/ACDC/training')
     parser.add_argument('--checkpoint', type=str, 
                         default='weights/advanced_asymmetric_dcn___pointrend_best.pt')
+    parser.add_argument('--stage2_blocks', type=int, default=2, help='Default blocks in stage2')
+    parser.add_argument('--stage3_blocks', type=int, default=4, help='Default blocks in stage3')
+    parser.add_argument('--stage4_blocks', type=int, default=6, help='Default blocks in stage4')
     args = parser.parse_args()
     
     analyze(args)
