@@ -1,10 +1,11 @@
 # =============================================================================
-# EGM-Net / SpecMamba - Unified Configuration
+# EGM-Net / SpecMamba - Master Configuration File
 # =============================================================================
-# All options for the ACDC segmentation pipeline
+# This is the SINGLE SOURCE OF TRUTH for all training options.
+# All CLI args in train_acdc.py can be overridden via this config.
 # =============================================================================
 
-# Quick preset (overridden by individual settings below)
+# Quick preset - override individual settings below if needed
 # Options: baseline, lite, sota, bio, spectral, attention
 preset: "sota"
 
@@ -13,44 +14,43 @@ preset: "sota"
 # =============================================================================
 model:
   name: "EGMNet"
-  in_channels: 3            # 1 for grayscale, 3 for RGB
-  num_classes: 4            # ACDC: 0=BG, 1=RV, 2=MYO, 3=LV
-  img_size: 224             # Input image size
+  in_channels: 3              # 1=grayscale, 3=RGB
+  num_classes: 4              # ACDC: 0=BG, 1=RV, 2=MYO, 3=LV
+  img_size: 224               # Input image size
   
-  # Backbone settings
+  # HRNet Backbone
   backbone:
-    type: "hrnet"           # "hrnet" or "simple"
-    base_channels: 64       # Base channel width (32, 48, 64)
-    num_stages: 4           # Number of HRNet stages
-    blocks_per_stage: 2     # Blocks per stage
+    type: "hrnet"             # "hrnet" or "simple"
+    base_channels: 64         # Channel width (32, 48, 64)
+    num_stages: 4             # Number of HRNet stages
+    blocks_per_stage: 2       # Blocks per stage
     
   # ==========================================================================
-  # BLOCK TYPE (replaces basic blocks inside HRNet stages)
-  # ==========================================================================
-  # Available options:
-  #   - "basic"             : Standard residual block (default HRNet)
-  #   - "convnext"          : ConvNeXt Block (SOTA CNN, 7x7 depthwise)
-  #   - "dcn"               : Deformable Conv v2 (learnable kernel offsets)
-  #   - "inverted_residual" : MobileNetV2 style (lightweight)
-  #   - "swin"              : Swin Transformer (window attention)
-  #   - "fno"               : Fourier Neural Operator (spectral conv)
-  #   - "wavelet"           : Wavelet Transform Block (multi-scale)
-  #   - "rwkv"              : RWKV Block (linear attention)
+  # BLOCK TYPE - Replaces basic blocks inside HRNet stages
   # ==========================================================================
   block:
-    type: "dcn"             # Recommended: "dcn" for best accuracy
-    depth: 2                # Blocks per stage (overridden by asymmetric config)
+    # Available types:
+    #   - "basic"             : Standard residual block
+    #   - "convnext"          : ConvNeXt Block (SOTA CNN)
+    #   - "dcn"               : Deformable Conv v2 ★ RECOMMENDED
+    #   - "inverted_residual" : MobileNetV2 style (lightweight)
+    #   - "swin"              : Swin Transformer (attention)
+    #   - "fno"               : Fourier Neural Operator (spectral)
+    #   - "wavelet"           : Wavelet Transform Block
+    #   - "rwkv"              : RWKV Block (linear attention)
+    type: "dcn"
+    depth: 2                  # Default blocks per stage
     
-    # Asymmetric block depths per stage (advanced)
+    # Asymmetric block depths (2-4-6 pyramid)
     asymmetric:
-      enabled: false
+      enabled: true
       stage2: 2
       stage3: 4
       stage4: 6
     
-    # Dilation pyramid for DCN (ASPP-style multi-scale)
+    # Dilation Pyramid for DCN (ASPP-style multi-scale)
     dilation_pyramid:
-      enabled: true         # Auto-use dilations [1,2,4,8,16,32] for DCN
+      enabled: true           # Auto: [1, 2, 4, 8, 16, 32]
     
     # Block-specific settings
     convnext:
@@ -71,18 +71,20 @@ model:
       d_conv: 4
       expand: 2
       
-  # Additional components
+  # Additional Components
   components:
-    use_mamba: false        # Use Mamba SSM blocks (requires mamba-ssm)
-    use_spectral: false     # Use spectral FFT processing
-    use_pointrend: true     # Use PointRend for boundary refinement
+    use_mamba: false          # Mamba SSM blocks (requires mamba-ssm)
+    use_spectral: false       # Spectral FFT processing
+    use_pointrend: true       # PointRend for boundary refinement
+    use_dog: true             # DoG preprocessing
 
 # =============================================================================
-# PREPROCESSING (DoG Layer)
+# PREPROCESSING
 # =============================================================================
 preprocessing:
+  # Difference of Gaussians (DoG) - Edge enhancement
   dog:
-    enabled: true           # Enable Difference of Gaussians
+    enabled: true
     scales: [[1.0, 2.0], [2.0, 4.0]]
     kernel_size: 15
     concat_original: true
@@ -93,21 +95,21 @@ preprocessing:
 heads:
   # Coarse Head (main segmentation output)
   coarse:
-    type: "constellation"   # "constellation" (RBF), "linear", "conv"
+    type: "constellation"     # "constellation" (RBF), "linear", "conv"
     enabled: true
     embedding_dim: 2
     init_gamma: 1.0
     
   # Fine Head (implicit refinement)
   fine:
-    type: "shearlet"        # "gabor", "shearlet", "none"
+    type: "shearlet"          # "gabor", "shearlet", "none"
     enabled: true
     hidden_dim: 256
     num_layers: 4
     num_frequencies: 64
     use_energy_gating: true
     
-  # Shearlet-specific config
+  # Shearlet-specific
   shearlet:
     num_orientations: 8
     num_frequencies: 4
@@ -115,46 +117,52 @@ heads:
     
   # Fusion method
   fusion:
-    type: "energy_gated"    # "energy_gated", "average", "learned"
+    type: "energy_gated"      # "energy_gated", "average", "learned"
     temperature: 1.0
 
 # =============================================================================
 # TRAINING CONFIGURATION
 # =============================================================================
 training:
-  # Basic settings
+  # Basic
   epochs: 150
   batch_size: 8
   num_workers: 0
   
   # Optimizer
-  optimizer: "adamw"
+  optimizer: "adamw"          # "adamw", "sgd", "adam"
   learning_rate: 1e-4
   weight_decay: 1e-5
   
   # Scheduler
-  scheduler: "cosine"       # "cosine", "reduce_plateau", "step"
+  scheduler: "cosine"         # "cosine", "reduce_plateau", "step"
   scheduler_params:
-    T_max: 150              # For cosine
+    T_max: 150                # For cosine
     eta_min: 1e-6
     
-  # Training techniques
+  # Training Techniques
   grad_clip: 1.0
-  use_amp: false            # Mixed precision training
-  early_stop: 30            # Epochs without improvement
+  use_amp: false              # Mixed precision (AMP)
+  early_stop: 30              # Epochs without improvement
   
   # SOTA Strategies
   sota:
+    # Boundary Loss
     boundary_loss: true
     boundary_weight: 0.5
-    warmup_epochs: 10       # Warmup for boundary loss
-    deep_supervision: false
+    warmup_epochs: 10         # Warmup before adding boundary loss
     
-  # Point sampling (for fine head)
+    # Deep Supervision
+    deep_supervision: false
+    ds_weights: [1.0, 0.5, 0.25, 0.125]
+    
+  # Point Sampling (for fine head)
   point_sampling:
     enabled: false
     num_samples: 4096
     boundary_ratio: 0.5
+    jitter_scale: 0.01
+    strategy: "uncertainty_energy"
     
   # Augmentation
   augmentation:
@@ -166,89 +174,109 @@ training:
 # LOSS CONFIGURATION
 # =============================================================================
 loss:
+  # Loss weights
   ce_weight: 1.0
   dice_weight: 1.0
-  focal_weight: 0.0
+  focal_weight: 0.0           # Set > 0 to enable focal loss
   focal_gamma: 2.0
   boundary_weight: 0.5
-  consistency_weight: 0.1   # For multi-scale consistency
-  energy_weight: 0.5        # For energy gating
+  consistency_weight: 0.1     # Multi-scale consistency
+  energy_weight: 0.5          # Energy gating loss
 
 # =============================================================================
 # EVALUATION CONFIGURATION
 # =============================================================================
 evaluation:
-  mode: "3d"                # "2d" (slice-wise) or "3d" (volumetric)
-  tta_val: false            # TTA for validation
-  tta_test: true            # 8x TTA for test
-  tta_modes: ["flip", "rotate90"]
+  # Evaluation mode
+  mode: "3d"                  # "2d" (slice-wise) or "3d" (volumetric)
+  
+  # Test Time Augmentation (TTA)
+  tta:
+    enabled_val: false        # TTA for validation
+    enabled_test: true        # TTA for test
+    modes: 8                  # 4 or 8 augmentations
+    # 4x: flip + 3 rotations
+    # 8x: 4 rotations x (original + hflip)
 
 # =============================================================================
 # DATA CONFIGURATION
 # =============================================================================
 data:
+  # Dataset
+  dataset: "ACDC"             # "ACDC", "Synapse", "BRATS", etc.
   root: "preprocessed_data/ACDC"
   train_dir: "training"
   test_dir: "testing"
-  train_split: 0.8          # Train/Val split ratio
-  seed: 42                  # Random seed for split
+  
+  # Split
+  train_split: 0.8            # Train/Val split ratio
+  seed: 42                    # Random seed for reproducibility
+  
+  # Data loading
+  use_memmap: true            # Memory-mapped loading
+  max_cache: 10               # Max volumes in cache
+  pin_memory: true
 
 # =============================================================================
 # OUTPUT CONFIGURATION
 # =============================================================================
 output:
   save_dir: "weights"
-  exp_name: null            # Auto-generate if null
-  save_interval: 50         # Save checkpoint every N epochs
+  exp_name: null              # Auto-generate if null
+  save_interval: 50           # Checkpoint every N epochs
   save_last: true
   save_best: true
+  save_history: true          # Save training history
 
 # =============================================================================
 # LOGGING
 # =============================================================================
 logging:
-  level: "INFO"             # DEBUG, INFO, WARNING, ERROR
-  log_interval: 100         # Log every N batches
-  val_interval: 1           # Validate every N epochs
+  level: "INFO"               # DEBUG, INFO, WARNING, ERROR
+  log_interval: 100           # Log every N batches
+  val_interval: 1             # Validate every N epochs
+  print_model_summary: true
+  tensorboard: false
 
 # =============================================================================
 # PRESETS REFERENCE
 # =============================================================================
-# These presets can be selected via `preset:` at the top
-#
 # baseline:
-#   - block.type: "basic"
-#   - preprocessing.dog.enabled: false
-#   - heads.fine.enabled: false
-#   - model.components.use_pointrend: false
+#   block.type: "basic"
+#   preprocessing.dog.enabled: false
+#   heads.fine.enabled: false
+#   components.use_pointrend: false
+#   evaluation.mode: "2d"
+#   ~5M params, fast training
 #
 # lite:
-#   - block.type: "inverted_residual"
-#   - preprocessing.dog.enabled: false
-#   - heads.fine.enabled: false
-#   - Fast inference, ~5M params
+#   block.type: "inverted_residual"
+#   preprocessing.dog.enabled: false
+#   heads.fine.enabled: false
+#   ~3M params, mobile-friendly
 #
-# sota:
-#   - block.type: "dcn"
-#   - block.dilation_pyramid.enabled: true
-#   - model.components.use_pointrend: true
-#   - training.sota.boundary_loss: true
-#   - evaluation.mode: "3d"
-#   - Best accuracy, ~25M params
+# sota: ★ RECOMMENDED
+#   block.type: "dcn"
+#   block.asymmetric.enabled: true (2-4-6)
+#   block.dilation_pyramid.enabled: true
+#   components.use_pointrend: true
+#   training.sota.boundary_loss: true
+#   evaluation.mode: "3d"
+#   ~25M params, best accuracy
 #
 # bio:
-#   - block.type: "dcn"
-#   - preprocessing.dog.enabled: true
-#   - heads.fine.type: "shearlet"
-#   - Biologically-inspired, DoG + Shearlet
+#   block.type: "dcn"
+#   preprocessing.dog.enabled: true
+#   heads.fine.type: "shearlet"
+#   Biologically-inspired processing
 #
 # spectral:
-#   - block.type: "fno"
-#   - model.components.use_spectral: true
-#   - Fourier-based processing
+#   block.type: "fno"
+#   components.use_spectral: true
+#   Fourier-based processing
 #
 # attention:
-#   - block.type: "swin"
-#   - heads.fine.type: "gabor"
-#   - Transformer-based attention
+#   block.type: "swin"
+#   heads.fine.type: "gabor"
+#   Transformer-based attention
 # =============================================================================
