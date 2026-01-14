@@ -24,10 +24,6 @@ from losses.sota_loss import CombinedSOTALoss, TTAInference
 CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
 
 
-# =============================================================================
-# EVALUATION
-# =============================================================================
-
 def evaluate_3d(model, dataset, device, num_classes=4):
     """3D Volumetric evaluation."""
     model.eval()
@@ -80,7 +76,8 @@ def evaluate_3d(model, dataset, device, num_classes=4):
 # TRAINING
 # =============================================================================
 
-def train_epoch(model, loader, criterion, optimizer, device, epoch, scaler=None, use_amp=False):
+def train_epoch(model, loader, criterion, optimizer, device, epoch, scaler=None, use_amp=False, 
+                deep_supervision=False, ds_weights=[0.4, 0.3, 0.2, 0.1]):
     model.train()
     total_loss = 0
     
@@ -91,16 +88,32 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, scaler=None,
         
         if use_amp and scaler:
             with torch.amp.autocast('cuda'):
-                out = model(imgs)['output']
+                outputs = model(imgs)
+                out = outputs['output']
                 loss, loss_dict = criterion(out, masks)
+                
+                # Deep supervision auxiliary losses
+                if deep_supervision and 'aux_outputs' in outputs:
+                    for i, aux_out in enumerate(outputs['aux_outputs']):
+                        aux_loss, _ = criterion(aux_out, masks)
+                        loss = loss + ds_weights[i] * aux_loss
+                        
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            out = model(imgs)['output']
+            outputs = model(imgs)
+            out = outputs['output']
             loss, loss_dict = criterion(out, masks)
+            
+            # Deep supervision auxiliary losses
+            if deep_supervision and 'aux_outputs' in outputs:
+                for i, aux_out in enumerate(outputs['aux_outputs']):
+                    aux_loss, _ = criterion(aux_out, masks)
+                    loss = loss + ds_weights[i] * aux_loss
+                    
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -177,7 +190,8 @@ def main():
             num_classes=num_classes,
             base_channels=args.base_channels,
             use_pointrend=args.use_pointrend,
-            full_resolution_mode=not args.no_full_res
+            full_resolution_mode=not args.no_full_res,
+            deep_supervision=args.deep_supervision
         ).to(device)
     else:
         from models.egm_net import EGMNet
@@ -248,7 +262,7 @@ def main():
     
     for epoch in range(args.epochs):
         criterion.current_epoch = epoch
-        loss = train_epoch(model, train_loader, criterion, optimizer, device, epoch, scaler, args.use_amp)
+        loss = train_epoch(model, train_loader, criterion, optimizer, device, epoch, scaler, args.use_amp, args.deep_supervision)
         scheduler.step()
         
         # Evaluate

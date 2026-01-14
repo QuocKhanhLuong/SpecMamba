@@ -16,9 +16,7 @@ import torch.nn.functional as F
 from .blocks import get_block
 
 
-# =============================================================================
-# HRNet COMPONENTS
-# =============================================================================
+
 
 class HRNetStem(nn.Module):
     """Standard HRNet stem with stride 4 (224 -> 56)."""
@@ -125,25 +123,15 @@ class HRNetStemFullRes(nn.Module):
 
 
 class HRNetDCN(nn.Module):
-    """
-    HRNet with Asymmetric DCN + Dilation Pyramid.
-    
-    Args:
-        in_channels: Input channels (3 for RGB, 4 for BraTS)
-        num_classes: Number of output classes
-        base_channels: Base channel count (default 64)
-        img_size: Input image size (default 224)
-        stage_configs: List of stage configs, each with 'blocks' key
-        use_pointrend: Enable PointRend boundary refinement
-        full_resolution_mode: Keep full resolution (no downsample in stem)
-    """
     
     def __init__(self, in_channels=3, num_classes=4, base_channels=64, img_size=224,
-                 stage_configs=None, use_pointrend=False, full_resolution_mode=True):
+                 stage_configs=None, use_pointrend=False, full_resolution_mode=True,
+                 deep_supervision=False):
         super().__init__()
         
         self.num_classes = num_classes
         self.full_resolution_mode = full_resolution_mode
+        self.deep_supervision = deep_supervision
         
         # Default: Asymmetric DCN (2-4-6)
         if stage_configs is None:
@@ -208,6 +196,15 @@ class HRNetDCN(nn.Module):
         
         # Segmentation head
         self.seg_head = nn.Conv2d(self.out_channels, num_classes, 1)
+        
+        # Deep supervision auxiliary heads
+        if deep_supervision:
+            self.aux_heads = nn.ModuleList([
+                nn.Conv2d(C, num_classes, 1),      # Stage2 stream1
+                nn.Conv2d(C*2, num_classes, 1),    # Stage2 stream2
+                nn.Conv2d(C*4, num_classes, 1),    # Stage3 stream3
+                nn.Conv2d(C*8, num_classes, 1),    # Stage4 stream4
+            ])
         
         # Optional PointRend
         self.use_pointrend = use_pointrend
@@ -289,7 +286,18 @@ class HRNetDCN(nn.Module):
         else:
             logits = F.interpolate(logits, size=target_size, mode='bilinear', align_corners=True)
         
-        return {'output': logits}
+        result = {'output': logits}
+        
+        # Deep supervision auxiliary outputs
+        if self.deep_supervision and hasattr(self, 'aux_heads'):
+            aux_outputs = []
+            for i, head in enumerate(self.aux_heads):
+                aux_logits = head(x_list[i])
+                aux_logits = F.interpolate(aux_logits, size=target_size, mode='bilinear', align_corners=True)
+                aux_outputs.append(aux_logits)
+            result['aux_outputs'] = aux_outputs
+        
+        return result
 
 
 def hrnet_dcn_small(num_classes=4, in_channels=3, use_pointrend=False):
