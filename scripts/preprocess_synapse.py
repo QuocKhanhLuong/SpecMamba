@@ -1,9 +1,14 @@
 """
 Preprocess Synapse dataset: Multi-organ CT → .npy volumes
-Classes: 14 organs (Spleen, Kidneys, Gallbladder, Liver, Stomach, Aorta, etc.)
+Data structure:
+    data/Synapse/
+    ├── synapse_train/       (images: DET0000101_avg.nii.gz)
+    └── synapse_train_label/ (labels: DET0000101_avg_seg.nii.gz)
+
+Classes: 14 organs
 
 Usage:
-    python scripts/preprocess_synapse.py --input data/Synapse/training --output preprocessed_data/Synapse/training
+    python scripts/preprocess_synapse.py --input data/Synapse --output preprocessed_data/Synapse/training
 """
 
 import os
@@ -23,81 +28,80 @@ def normalize_ct(image, window_center=40, window_width=400):
     return (image - min_val) / (max_val - min_val)
 
 
-def preprocess_patient(patient_path, target_size=(224, 224)):
-    """Process one Synapse case."""
-    patient_folder = os.path.basename(patient_path)
-    
-    img_path, label_path = None, None
-    
-    for f in os.listdir(patient_path):
-        full_path = os.path.join(patient_path, f)
-        if f.endswith(('.nii.gz', '.nii')):
-            f_lower = f.lower()
-            if 'label' in f_lower or 'seg' in f_lower or 'gt' in f_lower:
-                label_path = full_path
-            elif 'img' in f_lower or label_path is None:
-                img_path = full_path
-    
-    if not img_path or not label_path:
-        return []
-    
-    try:
-        img_data = normalize_ct(nib.load(img_path).get_fdata())
-        mask_data = nib.load(label_path).get_fdata().astype(np.uint8)
-        
-        num_slices = img_data.shape[2]
-        
-        resized_img = np.zeros((target_size[0], target_size[1], num_slices), dtype=np.float32)
-        resized_mask = np.zeros((target_size[0], target_size[1], num_slices), dtype=np.uint8)
-        
-        for i in range(num_slices):
-            resized_img[:, :, i] = resize(img_data[:, :, i], target_size, order=1, preserve_range=True, anti_aliasing=True, mode='reflect')
-            resized_mask[:, :, i] = resize(mask_data[:, :, i].astype(np.float32), target_size, order=0, preserve_range=True, anti_aliasing=False, mode='reflect').astype(np.uint8)
-        
-        return [(resized_img, resized_mask, patient_folder)]
-    except Exception as e:
-        print(f"  Error: {patient_folder}: {e}")
-        return []
-
-
 def main():
     parser = argparse.ArgumentParser(description='Preprocess Synapse dataset')
-    parser.add_argument('--input', type=str, required=True)
+    parser.add_argument('--input', type=str, required=True, help='Path to data/Synapse')
     parser.add_argument('--output', type=str, required=True)
     parser.add_argument('--size', type=int, default=224)
     parser.add_argument('--no-skip', action='store_true')
     args = parser.parse_args()
     
     target_size = (args.size, args.size)
+    
+    # Find train images and labels
+    train_dir = os.path.join(args.input, 'synapse_train')
+    label_dir = os.path.join(args.input, 'synapse_train_label')
+    
+    if not os.path.exists(train_dir):
+        print(f"Error: {train_dir} not found")
+        return
+    
     os.makedirs(args.output, exist_ok=True)
     volumes_dir = os.path.join(args.output, 'volumes')
     masks_dir = os.path.join(args.output, 'masks')
     os.makedirs(volumes_dir, exist_ok=True)
     os.makedirs(masks_dir, exist_ok=True)
     
-    patient_folders = sorted([
-        os.path.join(args.input, d) for d in os.listdir(args.input)
-        if os.path.isdir(os.path.join(args.input, d))
-    ])
+    # Get image files
+    img_files = sorted([f for f in os.listdir(train_dir) if f.endswith(('.nii.gz', '.nii'))])
     
-    print(f"Synapse Preprocessing: {len(patient_folders)} cases")
+    print(f"Synapse Preprocessing: {len(img_files)} cases")
     
     volume_info = {}
     processed, skipped = 0, 0
     
-    for patient_path in tqdm(patient_folders, desc="Synapse"):
-        for volume, mask, volume_id in preprocess_patient(patient_path, target_size):
-            vol_path = os.path.join(volumes_dir, f'{volume_id}.npy')
-            mask_path = os.path.join(masks_dir, f'{volume_id}.npy')
-            
-            if not args.no_skip and os.path.exists(vol_path):
-                skipped += 1
+    for img_file in tqdm(img_files, desc="Synapse"):
+        img_path = os.path.join(train_dir, img_file)
+        
+        # Find matching label file
+        base_name = img_file.replace('.nii.gz', '').replace('.nii', '')
+        label_file = f"{base_name}_seg.nii.gz"
+        label_path = os.path.join(label_dir, label_file)
+        
+        if not os.path.exists(label_path):
+            # Try without _seg suffix
+            label_path = os.path.join(label_dir, img_file)
+            if not os.path.exists(label_path):
+                print(f"  Warning: No label for {img_file}")
                 continue
+        
+        vol_path = os.path.join(volumes_dir, f'{base_name}.npy')
+        mask_path_out = os.path.join(masks_dir, f'{base_name}.npy')
+        
+        if not args.no_skip and os.path.exists(vol_path):
+            skipped += 1
+            continue
+        
+        try:
+            img_data = normalize_ct(nib.load(img_path).get_fdata())
+            mask_data = nib.load(label_path).get_fdata().astype(np.uint8)
             
-            np.save(vol_path, volume)
-            np.save(mask_path, mask)
-            volume_info[volume_id] = {'num_slices': int(mask.shape[2])}
+            num_slices = img_data.shape[2]
+            
+            resized_img = np.zeros((target_size[0], target_size[1], num_slices), dtype=np.float32)
+            resized_mask = np.zeros((target_size[0], target_size[1], num_slices), dtype=np.uint8)
+            
+            for i in range(num_slices):
+                resized_img[:, :, i] = resize(img_data[:, :, i], target_size, order=1, preserve_range=True, anti_aliasing=True, mode='reflect')
+                resized_mask[:, :, i] = resize(mask_data[:, :, i].astype(np.float32), target_size, order=0, preserve_range=True, anti_aliasing=False, mode='reflect').astype(np.uint8)
+            
+            np.save(vol_path, resized_img)
+            np.save(mask_path_out, resized_mask)
+            volume_info[base_name] = {'num_slices': int(num_slices)}
             processed += 1
+            
+        except Exception as e:
+            print(f"  Error: {img_file}: {e}")
     
     metadata = {
         'dataset': 'Synapse', 'num_classes': 14,
