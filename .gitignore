@@ -110,3 +110,5 @@ results/
 tmp/
 temp/
 *.tmp
+
+visualizations/

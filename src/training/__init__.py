@@ -1,4 +1,1 @@
-
-from .config import ModelConfig, LossConfig, TrainingConfig
-
-__all__ = ['ModelConfig', 'LossConfig', 'TrainingConfig']
+# Training module
