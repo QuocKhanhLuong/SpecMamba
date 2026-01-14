@@ -16,9 +16,6 @@ import torchvision.ops
 import math
 from typing import Optional, Tuple, List
 
-# =============================================================================
-# UTILITY LAYERS (Must be defined first)
-# =============================================================================
 
 class DropPath(nn.Module):
     """Stochastic Depth / Drop Path"""
