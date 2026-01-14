@@ -126,7 +126,7 @@ class HRNetDCN(nn.Module):
     
     def __init__(self, in_channels=3, num_classes=4, base_channels=64, img_size=224,
                  stage_configs=None, use_pointrend=False, full_resolution_mode=True,
-                 deep_supervision=False):
+                 deep_supervision=False, use_shearlet=False):
         super().__init__()
         
         self.num_classes = num_classes
@@ -216,6 +216,20 @@ class HRNetDCN(nn.Module):
                 num_points=1024,
                 hidden_dim=128
             )
+        
+        # Optional Shearlet Head for fine-grained boundary refinement
+        self.use_shearlet = use_shearlet
+        if use_shearlet:
+            from layers.shearlet_implicit import ShearletImplicitHead
+            self.shearlet_head = ShearletImplicitHead(
+                feature_dim=self.out_channels,
+                num_classes=num_classes,
+                hidden_dim=256,
+                num_orientations=8,
+                num_frequencies=4
+            )
+            # Fusion weight for shearlet output
+            self.shearlet_fusion = nn.Parameter(torch.tensor(0.5))
     
     def _make_stage(self, channels_list, block_types, sizes):
         """Create stage with DCN Dilation Pyramid (HDC strategy)."""
@@ -285,6 +299,13 @@ class HRNetDCN(nn.Module):
             logits = self.pointrend(logits, features, target_size)
         else:
             logits = F.interpolate(logits, size=target_size, mode='bilinear', align_corners=True)
+        
+        # Shearlet refinement head - fuse with main logits
+        if self.use_shearlet and hasattr(self, 'shearlet_head'):
+            features_up = F.interpolate(features, size=target_size, mode='bilinear', align_corners=True)
+            shearlet_logits = self.shearlet_head(features_up, output_size=target_size)
+            w = torch.sigmoid(self.shearlet_fusion)
+            logits = (1 - w) * logits + w * shearlet_logits
         
         result = {'output': logits}
         

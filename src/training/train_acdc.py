@@ -137,16 +137,10 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4)
     
     # Model Selection
-    parser.add_argument('--model', type=str, default='hrnet_dcn', choices=['hrnet_dcn', 'egmnet'])
     parser.add_argument('--base_channels', type=int, default=48, help='HRNetDCN: 32/48/64')
     parser.add_argument('--use_pointrend', action='store_true', help='Enable PointRend')
+    parser.add_argument('--use_shearlet', action='store_true', help='Enable Shearlet refinement head')
     parser.add_argument('--no_full_res', action='store_true', help='Disable full resolution mode (faster, less VRAM)')
-    
-    # EGMNet-specific (legacy)
-    parser.add_argument('--block_type', type=str, default='dcn')
-    parser.add_argument('--fine_head_type', type=str, default='shearlet', choices=['gabor', 'shearlet'])
-    parser.add_argument('--use_spectral', action='store_true', help='Enable spectral processing')
-    parser.add_argument('--use_dog', action='store_true', help='Enable DoG preprocessing')
     
     # Training
     parser.add_argument('--epochs', type=int, default=150)
@@ -162,9 +156,9 @@ def main():
     parser.add_argument('--ce_weight', type=float, default=1.0)
     parser.add_argument('--deep_supervision', action='store_true', help='Enable deep supervision')
     
-    # Evaluation
-    parser.add_argument('--eval_3d', action='store_true', help='3D volumetric evaluation')
-    parser.add_argument('--use_tta', action='store_true', help='TTA for validation')
+    # Evaluation - defaults to 3D + TTA
+    parser.add_argument('--no_eval_3d', action='store_true', help='Disable 3D volumetric evaluation (use 2D)')
+    parser.add_argument('--no_tta', action='store_true', help='Disable TTA for validation')
     parser.add_argument('--tta_test', action='store_true', help='8x TTA for test')
     
     # Output
@@ -183,39 +177,31 @@ def main():
     num_classes = 4
     in_channels = 3
     
-    if args.model == 'hrnet_dcn':
-        from models.hrnet_dcn import HRNetDCN
-        model = HRNetDCN(
-            in_channels=in_channels,
-            num_classes=num_classes,
-            base_channels=args.base_channels,
-            use_pointrend=args.use_pointrend,
-            full_resolution_mode=not args.no_full_res,
-            deep_supervision=args.deep_supervision
-        ).to(device)
-    else:
-        from models.egm_net import EGMNet
-        model = EGMNet(
-            in_channels=in_channels,
-            num_classes=num_classes,
-            img_size=224,
-            use_hrnet=True,
-            use_spectral=args.use_spectral,
-            use_dog=args.use_dog,
-            fine_head_type=args.fine_head_type,
-            block_type=args.block_type
-        ).to(device)
+    from models.hrnet_dcn import HRNetDCN
+    model = HRNetDCN(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        base_channels=args.base_channels,
+        use_pointrend=args.use_pointrend,
+        full_resolution_mode=not args.no_full_res,
+        deep_supervision=args.deep_supervision,
+        use_shearlet=args.use_shearlet
+    ).to(device)
     
     params = sum(p.numel() for p in model.parameters())
     
+    eval_3d = not args.no_eval_3d
+    use_tta = not args.no_tta
+    
     print(f"\n{'='*60}")
-    print(f"ACDC Training - {args.model.upper()}")
+    print("ACDC Training - HRNetDCN")
     print(f"{'='*60}")
-    print(f"Model:      {args.model} | Base Ch: {args.base_channels} | Params: {params:,}")
+    print(f"Model:      Base Ch={args.base_channels} | Params={params:,}")
+    print(f"Features:   FullRes={'✓' if not args.no_full_res else '✗'} | PointRend={'✓' if args.use_pointrend else '✗'} | Shearlet={'✓' if args.use_shearlet else '✗'}")
     print(f"Training:   BS={args.batch_size} | LR={args.lr} | Epochs={args.epochs}")
     print(f"Loss:       Boundary={args.boundary_weight} | DeepSup={'✓' if args.deep_supervision else '✗'}")
-    print(f"Eval:       {'3D' if args.eval_3d else '2D'} | TTA={'✓' if args.use_tta else '✗'}")
-    print(f"Options:    AMP={'✓' if args.use_amp else '✗'} | PointRend={'✓' if args.use_pointrend else '✗'}")
+    print(f"Eval:       {'3D' if eval_3d else '2D'} | TTA={'✓' if use_tta else '✗'}")
+    print(f"Options:    AMP={'✓' if args.use_amp else '✗'}")
     
     # Data
     dataset = ACDCDataset2D(args.data_dir, in_channels=in_channels)
@@ -265,16 +251,11 @@ def main():
         loss = train_epoch(model, train_loader, criterion, optimizer, device, epoch, scaler, args.use_amp, args.deep_supervision)
         scheduler.step()
         
-        # Evaluate
-        if args.eval_3d:
-            metrics = evaluate_3d(model, val_ds, device, num_classes)
-            dice = metrics['mean_dice']
-            hd95 = metrics['mean_hd95']
-            print(f"E{epoch+1:03d} | Loss: {loss:.4f} | 3D Dice: {dice:.4f} | HD95: {hd95:.2f}")
-        else:
-            metrics = evaluate_2d(model, val_loader, device, num_classes, args.use_tta)
-            dice = metrics['mean_dice']
-            print(f"E{epoch+1:03d} | Loss: {loss:.4f} | 2D Dice: {dice:.4f}")
+        # Evaluate (3D volumetric by default)
+        metrics = evaluate_3d(model, val_ds, device, num_classes)
+        dice = metrics['mean_dice']
+        hd95 = metrics['mean_hd95']
+        print(f"E{epoch+1:03d} | Loss: {loss:.4f} | 3D Dice: {dice:.4f} | HD95: {hd95:.2f}")
         
         # Save best
         if dice > best_dice:
