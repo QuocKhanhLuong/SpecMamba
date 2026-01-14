@@ -127,7 +127,7 @@ def main():
     parser.add_argument('--model', type=str, default='hrnet_dcn', choices=['hrnet_dcn', 'egmnet'])
     parser.add_argument('--base_channels', type=int, default=48, help='HRNetDCN: 32/48/64')
     parser.add_argument('--use_pointrend', action='store_true', help='Enable PointRend')
-    parser.add_argument('--full_res', action='store_true', help='Full resolution mode (stream1=224x224)')
+    parser.add_argument('--no_full_res', action='store_true', help='Disable full resolution mode (faster, less VRAM)')
     
     # EGMNet-specific (legacy)
     parser.add_argument('--block_type', type=str, default='dcn')
@@ -177,7 +177,7 @@ def main():
             num_classes=num_classes,
             base_channels=args.base_channels,
             use_pointrend=args.use_pointrend,
-            full_resolution_mode=args.full_res
+            full_resolution_mode=not args.no_full_res
         ).to(device)
     else:
         from models.egm_net import EGMNet
@@ -237,7 +237,7 @@ def main():
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
-    scaler = torch.cuda.amp.GradScaler() if args.use_amp else None
+    scaler = torch.amp.GradScaler('cuda') if args.use_amp else None
     
     best_dice = 0
     epochs_no_improve = 0
