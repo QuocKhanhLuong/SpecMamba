@@ -1,7 +1,4 @@
-"""
-ACDC Training Script - Unified for EGMNet and HRNetDCN
-Supports: Boundary Loss, Deep Supervision, TTA, 3D Eval, PointRend, Mixed Precision
-"""
+
 
 import sys
 import os
@@ -80,12 +77,26 @@ def evaluate_3d(model, dataset, device, num_classes=4):
             else:
                 hd95_3d[c].append(0.0 if not pred_c.any() and not target_c.any() else 100.0)
     
+    
+    # Calculate means
+    mean_dice = np.mean([np.mean(dice_3d[c]) for c in range(1, num_classes)])
+    mean_hd95 = np.mean([np.mean(hd95_3d[c]) for c in range(1, num_classes)])
+    mean_prec = np.mean([np.mean(prec_3d[c]) for c in range(1, num_classes)])
+    mean_recall = np.mean([np.mean(recall_3d[c]) for c in range(1, num_classes)])
+    mean_acc = np.mean([np.mean(acc_3d[c]) for c in range(1, num_classes)])
+    
     return {
-        'mean_dice': np.mean([np.mean(dice_3d[c]) for c in range(1, num_classes)]),
-        'mean_hd95': np.mean([np.mean(hd95_3d[c]) for c in range(1, num_classes)]),
-        'mean_prec': np.mean([np.mean(prec_3d[c]) for c in range(1, num_classes)]),
-        'mean_recall': np.mean([np.mean(recall_3d[c]) for c in range(1, num_classes)]),
-        'mean_acc': np.mean([np.mean(acc_3d[c]) for c in range(1, num_classes)]),
+        'mean_dice': mean_dice,
+        'mean_hd95': mean_hd95,
+        'mean_prec': mean_prec,
+        'mean_recall': mean_recall,
+        'mean_acc': mean_acc,
+        # Per-class raw lists for detailed logging
+        'dice_all': dice_3d,
+        'hd95_all': hd95_3d,
+        'prec_all': prec_3d,
+        'recall_all': recall_3d,
+        'acc_all': acc_3d,
     }
 
 
@@ -256,8 +267,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.amp.GradScaler('cuda') if args.use_amp else None
     
-    best_dice = 0.0
-    best_hd95 = float('inf')
+    best_overall = float('-inf')
     epochs_no_improve = 0
     
     print(f"\n{'='*60}")
@@ -271,12 +281,31 @@ def main():
         
         # Evaluate (3D volumetric by default)
         metrics = evaluate_3d(model, val_ds, device, num_classes)
+        
         dice = metrics['mean_dice']
         hd95 = metrics['mean_hd95']
         prec = metrics['mean_prec']
         rec = metrics['mean_recall']
         acc = metrics['mean_acc']
-        print(f"E{epoch+1:03d} | Loss: {loss:.4f} | Dice/F1: {dice:.4f} | HD95: {hd95:.2f} | Prec: {prec:.4f} | Rec: {rec:.4f} | Acc: {acc:.4f}")
+        
+        # Calculate Overall Score: Dice + 1/(HD95+1)
+        safe_hd95 = hd95 if hd95 != float('inf') else 100.0
+        overall_score = dice + (1.0 / (safe_hd95 + 1.0))
+        
+        # Verbose Logging
+        print(f"\nE{epoch+1:03d} | Loss: {loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"   --- Summary Metrics ---")
+        print(f"   => Avg Foreground: Dice: {dice:.4f}, HD95: {hd95:.4f}, Prec: {prec:.4f}, Rec: {rec:.4f}, Acc: {acc:.4f}")
+        print(f"   => Overall Score: {overall_score:.4f}")
+        
+        print(f"   --- Per-Class Metrics ---")
+        for c in range(1, num_classes):
+            c_name = CLASS_MAP.get(c, f"Class {c}")
+            c_dice = np.mean(metrics['dice_all'][c])
+            c_hd95 = np.mean(metrics['hd95_all'][c])
+            c_prec = np.mean(metrics['prec_all'][c])
+            c_rec = np.mean(metrics['recall_all'][c])
+            print(f"   => {c_name:<10}: Dice: {c_dice:.4f}, HD95: {c_hd95:.4f}, Prec: {c_prec:.4f}, Rec: {c_rec:.4f}")
         
         # Save best models
         saved = False
@@ -285,14 +314,21 @@ def main():
         if dice > best_dice:
             best_dice = dice
             torch.save(model.state_dict(), os.path.join(args.save_dir, f"{args.exp_name}_best_dice.pt"))
-            print(f"  ★ New Best Dice: {best_dice:.4f}")
+            print(f"   ★ New Best Dice: {best_dice:.4f}")
             saved = True
             
         # 2. Best HD95
         if hd95 < best_hd95:
             best_hd95 = hd95
             torch.save(model.state_dict(), os.path.join(args.save_dir, f"{args.exp_name}_best_hd95.pt"))
-            print(f"  ★ New Best HD95: {best_hd95:.2f}")
+            print(f"   ★ New Best HD95: {best_hd95:.2f}")
+            saved = True
+            
+        # 3. Best Overall
+        if overall_score > best_overall:
+            best_overall = overall_score
+            torch.save(model.state_dict(), os.path.join(args.save_dir, f"{args.exp_name}_best_overall.pt"))
+            print(f"   ★ New Best Overall: {best_overall:.4f}")
             saved = True
             
         if saved:
@@ -305,9 +341,10 @@ def main():
             break
     
     print(f"\n{'='*60}")
-    print(f"\nTraining Complete!")
+    print(f"Training Complete!")
     print(f"Best Dice: {best_dice:.4f}")
-    print(f"Best HD95: {best_hd95:.2f}")
+    print(f"Best HD95: {best_hd95:.4f}")
+    print(f"Best Overall: {best_overall:.4f}")
     print(f"{'='*60}")
 
 
