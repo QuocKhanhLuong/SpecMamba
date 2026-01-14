@@ -267,11 +267,14 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.amp.GradScaler('cuda') if args.use_amp else None
     
-    best_overall = float('-inf')
+    best_balanced = float('-inf')
+    best_dice = 0.0
+    best_hd95 = float('inf')
     epochs_no_improve = 0
+    ALPHA_HD95 = 0.1
     
     print(f"\n{'='*60}")
-    print("Training Started")
+    print("Training Started (Target: Balanced Score = Dice - 0.1*HD95)")
     print(f"{'='*60}\n")
     
     for epoch in range(args.epochs):
@@ -287,16 +290,21 @@ def main():
         prec = metrics['mean_prec']
         rec = metrics['mean_recall']
         acc = metrics['mean_acc']
-        
-        # Calculate Overall Score: Dice + 1/(HD95+1)
-        safe_hd95 = hd95 if hd95 != float('inf') else 100.0
-        overall_score = dice + (1.0 / (safe_hd95 + 1.0))
+
+        # Determine penalty for HD95
+        if hd95 > 100 or np.isnan(hd95):
+            penalty = 10.0 # Heavy penalty for non-convergence or explosion
+        else:
+            penalty = hd95
+            
+        # Calculate Balanced Score
+        balanced_score = dice - (ALPHA_HD95 * penalty)
         
         # Verbose Logging
         print(f"\nE{epoch+1:03d} | Loss: {loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
         print(f"   --- Summary Metrics ---")
         print(f"   => Avg Foreground: Dice: {dice:.4f}, HD95: {hd95:.4f}, Prec: {prec:.4f}, Rec: {rec:.4f}, Acc: {acc:.4f}")
-        print(f"   => Overall Score: {overall_score:.4f}")
+        print(f"   => Balanced Score: {balanced_score:.4f}")
         
         print(f"   --- Per-Class Metrics ---")
         for c in range(1, num_classes):
@@ -324,11 +332,11 @@ def main():
             print(f"   ★ New Best HD95: {best_hd95:.2f}")
             saved = True
             
-        # 3. Best Overall
-        if overall_score > best_overall:
-            best_overall = overall_score
-            torch.save(model.state_dict(), os.path.join(args.save_dir, f"{args.exp_name}_best_overall.pt"))
-            print(f"   ★ New Best Overall: {best_overall:.4f}")
+        # 3. Best Balanced Score
+        if balanced_score > best_balanced:
+            best_balanced = balanced_score
+            torch.save(model.state_dict(), os.path.join(args.save_dir, f"{args.exp_name}_best_balanced.pt"))
+            print(f"   ★ New Best Balanced: {best_balanced:.4f}")
             saved = True
             
         if saved:
@@ -344,7 +352,7 @@ def main():
     print(f"Training Complete!")
     print(f"Best Dice: {best_dice:.4f}")
     print(f"Best HD95: {best_hd95:.4f}")
-    print(f"Best Overall: {best_overall:.4f}")
+    print(f"Best Balanced: {best_balanced:.4f}")
     print(f"{'='*60}")
 
 
