@@ -256,7 +256,8 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.amp.GradScaler('cuda') if args.use_amp else None
     
-    best_dice = 0
+    best_dice = 0.0
+    best_hd95 = float('inf')
     epochs_no_improve = 0
     
     print(f"\n{'='*60}")
@@ -277,12 +278,25 @@ def main():
         acc = metrics['mean_acc']
         print(f"E{epoch+1:03d} | Loss: {loss:.4f} | Dice/F1: {dice:.4f} | HD95: {hd95:.2f} | Prec: {prec:.4f} | Rec: {rec:.4f} | Acc: {acc:.4f}")
         
-        # Save best
+        # Save best models
+        saved = False
+        
+        # 1. Best Dice
         if dice > best_dice:
             best_dice = dice
+            torch.save(model.state_dict(), os.path.join(args.save_dir, f"{args.exp_name}_best_dice.pt"))
+            print(f"  ★ New Best Dice: {best_dice:.4f}")
+            saved = True
+            
+        # 2. Best HD95
+        if hd95 < best_hd95:
+            best_hd95 = hd95
+            torch.save(model.state_dict(), os.path.join(args.save_dir, f"{args.exp_name}_best_hd95.pt"))
+            print(f"  ★ New Best HD95: {best_hd95:.2f}")
+            saved = True
+            
+        if saved:
             epochs_no_improve = 0
-            torch.save(model.state_dict(), os.path.join(args.save_dir, f"{args.exp_name}_best.pt"))
-            print(f"  ★ New best: {best_dice:.4f}")
         else:
             epochs_no_improve += 1
         
@@ -291,7 +305,9 @@ def main():
             break
     
     print(f"\n{'='*60}")
-    print(f"Training Complete! Best Dice: {best_dice:.4f}")
+    print(f"\nTraining Complete!")
+    print(f"Best Dice: {best_dice:.4f}")
+    print(f"Best HD95: {best_hd95:.2f}")
     print(f"{'='*60}")
 
 
