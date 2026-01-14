@@ -28,30 +28,6 @@ CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
 # EVALUATION
 # =============================================================================
 
-def evaluate_2d(model, loader, device, num_classes=4, use_tta=False):
-    """2D Slice-based evaluation with optional TTA."""
-    model.eval()
-    tta = TTAInference(model, device) if use_tta else None
-    dice_s = [0.] * num_classes
-    batches = 0
-    
-    with torch.no_grad():
-        for imgs, tgts in loader:
-            imgs, tgts = imgs.to(device), tgts.to(device)
-            if use_tta:
-                preds = tta.predict_8x(imgs)
-            else:
-                preds = model(imgs)['output'].argmax(1)
-            batches += 1
-            for c in range(num_classes):
-                pc = (preds == c).float().view(-1)
-                tc = (tgts == c).float().view(-1)
-                inter = (pc * tc).sum()
-                dice_s[c] += ((2. * inter + 1e-6) / (pc.sum() + tc.sum() + 1e-6)).item()
-    
-    return {'mean_dice': np.mean([dice_s[c] / max(batches, 1) for c in range(1, num_classes)])}
-
-
 def evaluate_3d(model, dataset, device, num_classes=4):
     """3D Volumetric evaluation."""
     model.eval()
@@ -114,7 +90,7 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, scaler=None,
         optimizer.zero_grad()
         
         if use_amp and scaler:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 out = model(imgs)['output']
                 loss, loss_dict = criterion(out, masks)
             scaler.scale(loss).backward()
@@ -151,6 +127,7 @@ def main():
     parser.add_argument('--model', type=str, default='hrnet_dcn', choices=['hrnet_dcn', 'egmnet'])
     parser.add_argument('--base_channels', type=int, default=48, help='HRNetDCN: 32/48/64')
     parser.add_argument('--use_pointrend', action='store_true', help='Enable PointRend')
+    parser.add_argument('--full_res', action='store_true', help='Full resolution mode (stream1=224x224)')
     
     # EGMNet-specific (legacy)
     parser.add_argument('--block_type', type=str, default='dcn')
@@ -199,7 +176,8 @@ def main():
             in_channels=in_channels,
             num_classes=num_classes,
             base_channels=args.base_channels,
-            use_pointrend=args.use_pointrend
+            use_pointrend=args.use_pointrend,
+            full_resolution_mode=args.full_res
         ).to(device)
     else:
         from models.egm_net import EGMNet
