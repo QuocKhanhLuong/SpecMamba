@@ -84,7 +84,7 @@ venv.bak/
 *.npz
 *.h5
 *.hdf5
-
+data/
 # Model checkpoints
 checkpoints/
 checkpoints_egm/
