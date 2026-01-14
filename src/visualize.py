@@ -287,10 +287,16 @@ def main():
     parser.add_argument('--data_dir', type=str, default='preprocessed_data/ACDC/testing')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
     
-    # Model
+    # Model type
+    parser.add_argument('--model_type', type=str, default='egmnet', 
+                       choices=['egmnet', 'hrnet_advanced'],
+                       help='Model type: egmnet or hrnet_advanced (from test_advanced_arch)')
     parser.add_argument('--block_type', type=str, default='dcn')
     parser.add_argument('--use_dog', action='store_true')
     parser.add_argument('--fine_head_type', type=str, default='shearlet')
+    parser.add_argument('--use_pointrend', action='store_true')
+    parser.add_argument('--full_resolution_mode', action='store_true')
+    parser.add_argument('--base_channels', type=int, default=62)
     
     # Visualization
     parser.add_argument('--mode', type=str, default='both', choices=['2d', '3d', 'both'])
@@ -306,25 +312,44 @@ def main():
     print("ACDC Segmentation Visualization")
     print(f"{'='*70}")
     print(f"Checkpoint: {args.checkpoint}")
+    print(f"Model Type: {args.model_type}")
     print(f"Data: {args.data_dir}")
     print(f"Mode: {args.mode}")
     
     # Load model
-    model = EGMNet(
-        in_channels=3,
-        num_classes=4,
-        img_size=224,
-        use_hrnet=True,
-        use_mamba=False,
-        use_spectral=False,
-        use_fine_head=True,
-        use_dog=args.use_dog,
-        fine_head_type=args.fine_head_type,
-        block_type=args.block_type
-    ).to(device)
+    if args.model_type == 'hrnet_advanced':
+        # Import HRNetAdvanced from test_advanced_arch
+        from training.test_advanced_arch import HRNetAdvanced
+        
+        model = HRNetAdvanced(
+            in_channels=3,
+            base_channels=args.base_channels,
+            img_size=224,
+            stage_configs=[
+                {'blocks': ['dcn'] * 2},
+                {'blocks': ['dcn'] * 4},
+                {'blocks': ['dcn'] * 6},
+            ],
+            use_pointrend=args.use_pointrend,
+            num_classes=4,
+            full_resolution_mode=args.full_resolution_mode
+        ).to(device)
+    else:
+        model = EGMNet(
+            in_channels=3,
+            num_classes=4,
+            img_size=224,
+            use_hrnet=True,
+            use_mamba=False,
+            use_spectral=False,
+            use_fine_head=True,
+            use_dog=args.use_dog,
+            fine_head_type=args.fine_head_type,
+            block_type=args.block_type
+        ).to(device)
     
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=True)
-    model.load_state_dict(checkpoint)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint, strict=False)
     model.eval()
     print(f"✓ Loaded model from {args.checkpoint}")
     
