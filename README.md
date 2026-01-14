@@ -8,6 +8,11 @@ A state-of-the-art medical image segmentation architecture combining HRNet's hig
 
 ## 🏗️ Architecture Overview
 
+![HDC-HRNet Architecture](assets/architecture.png)
+
+<details>
+<summary>📐 ASCII Diagram (Click to expand)</summary>
+
 ```
 Input Image (H×W×C)
         │
@@ -60,6 +65,8 @@ Input Image (H×W×C)
 │  (1×1 Conv)   │  │  (Optional)   │  │   (Optional)  │
 └───────────────┘  └───────────────┘  └───────────────┘
 ```
+
+</details>
 
 ---
 
