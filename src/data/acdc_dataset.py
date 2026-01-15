@@ -28,7 +28,7 @@ def get_train_augmentations():
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Rotate(limit=15, p=0.5, border_mode=0),
-        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.15, rotate_limit=0, p=0.5, border_mode=0),
+        A.Affine(scale=(0.85, 1.15), translate_percent=(-0.1, 0.1), p=0.5),
         
         # Elastic deformation (common in medical imaging)
         A.ElasticTransform(alpha=50, sigma=5, p=0.3),
@@ -36,7 +36,7 @@ def get_train_augmentations():
         
         # Intensity transforms
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-        A.GaussNoise(var_limit=(5, 25), p=0.3),
+        A.GaussNoise(std_range=(0.02, 0.1), p=0.3),
         A.GaussianBlur(blur_limit=(3, 5), p=0.2),
         
         # Normalize and convert
