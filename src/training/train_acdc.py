@@ -15,7 +15,7 @@ from collections import defaultdict
 from scipy.ndimage import distance_transform_edt, binary_erosion
 from datetime import datetime
 
-from data.acdc_dataset import ACDCDataset2D
+from data.acdc_dataset import ACDCDataset2D, ACDCDataset2DAugmented
 from losses.sota_loss import CombinedSOTALoss, TTAInference
 
 CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
@@ -177,6 +177,7 @@ def main():
     parser.add_argument('--warmup_epochs', type=int, default=10)
     parser.add_argument('--early_stop', type=int, default=30)
     parser.add_argument('--use_amp', action='store_true', help='Mixed precision')
+    parser.add_argument('--augment', action='store_true', help='Enable data augmentation')
     
     # Loss
     parser.add_argument('--boundary_weight', type=float, default=0.5)
@@ -232,20 +233,31 @@ def main():
     print(f"Options:    AMP={'✓' if args.use_amp else '✗'}")
     
     # Data
-    dataset = ACDCDataset2D(args.data_dir, in_channels=in_channels)
+    # Create dataset - use augmented version for training if --augment is set
+    base_dataset = ACDCDataset2D(args.data_dir, in_channels=in_channels)
     
-    num_vols = len(dataset.vol_paths)
+    num_vols = len(base_dataset.vol_paths)
     vol_indices = list(range(num_vols))
     np.random.seed(42)
     np.random.shuffle(vol_indices)
     split = int(num_vols * 0.8)
     train_vols, val_vols = set(vol_indices[:split]), set(vol_indices[split:])
     
-    train_idx = [i for i, (v, s) in enumerate(dataset.index_map) if v in train_vols]
-    val_idx = [i for i, (v, s) in enumerate(dataset.index_map) if v in val_vols]
+    train_idx = [i for i, (v, s) in enumerate(base_dataset.index_map) if v in train_vols]
+    val_idx = [i for i, (v, s) in enumerate(base_dataset.index_map) if v in val_vols]
     
-    train_ds = Subset(dataset, train_idx)
-    val_ds = Subset(dataset, val_idx)
+    # Create train dataset with optional augmentation
+    if args.augment:
+        train_ds = ACDCDataset2DAugmented(args.data_dir, in_channels=in_channels, augment=True)
+        # Filter to train indices only (rebuild index_map subset)
+        train_ds.index_map = [base_dataset.index_map[i] for i in train_idx]
+        print(f"Augmentation: ✓ ENABLED")
+    else:
+        train_ds = Subset(base_dataset, train_idx)
+        print(f"Augmentation: ✗ Disabled")
+    
+    # Validation always without augmentation
+    val_ds = Subset(base_dataset, val_idx)
     
     train_loader = DataLoader(train_ds, args.batch_size, shuffle=True, 
                               num_workers=args.num_workers, pin_memory=True)
