@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Subset
 from collections import defaultdict
 from scipy.ndimage import distance_transform_edt, binary_erosion
 from datetime import datetime
+import json
 
 from data.acdc_dataset import ACDCDataset2D, ACDCDataset2DAugmented
 from losses.sota_loss import CombinedSOTALoss, TTAInference
@@ -297,6 +298,22 @@ def main():
     epochs_no_improve = 0
     ALPHA_HD95 = 0.1
     
+    # History tracking for plotting
+    history = {
+        'epoch': [],
+        'train_loss': [],
+        'val_dice': [],
+        'val_hd95': [],
+        'val_prec': [],
+        'val_recall': [],
+        'val_acc': [],
+        'balanced_score': [],
+        'lr': [],
+        # Per-class metrics
+        'dice_rv': [], 'dice_myo': [], 'dice_lv': [],
+        'hd95_rv': [], 'hd95_myo': [], 'hd95_lv': [],
+    }
+    
     print(f"\n{'='*60}")
     print("Training Started (Target: Balanced Score = Dice - 0.1*HD95)")
     print(f"{'='*60}\n")
@@ -323,6 +340,25 @@ def main():
             
         # Calculate Balanced Score
         balanced_score = dice - (ALPHA_HD95 * penalty)
+        
+        # Record history
+        history['epoch'].append(epoch + 1)
+        history['train_loss'].append(loss)
+        history['val_dice'].append(dice)
+        history['val_hd95'].append(hd95)
+        history['val_prec'].append(prec)
+        history['val_recall'].append(rec)
+        history['val_acc'].append(acc)
+        history['balanced_score'].append(balanced_score)
+        history['lr'].append(optimizer.param_groups[0]['lr'])
+        
+        # Per-class metrics
+        history['dice_rv'].append(np.mean(metrics['dice_all'][1]))
+        history['dice_myo'].append(np.mean(metrics['dice_all'][2]))
+        history['dice_lv'].append(np.mean(metrics['dice_all'][3]))
+        history['hd95_rv'].append(np.mean(metrics['hd95_all'][1]))
+        history['hd95_myo'].append(np.mean(metrics['hd95_all'][2]))
+        history['hd95_lv'].append(np.mean(metrics['hd95_all'][3]))
         
         # Verbose Logging
         print(f"\nE{epoch+1:03d} | Loss: {loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
@@ -378,6 +414,12 @@ def main():
     print(f"Best HD95: {best_hd95:.4f}")
     print(f"Best Balanced: {best_balanced:.4f}")
     print(f"{'='*60}")
+    
+    # Save training history to JSON
+    history_path = os.path.join(args.save_dir, f"{args.exp_name}_history.json")
+    with open(history_path, 'w') as f:
+        json.dump(history, f, indent=2)
+    print(f"\n✓ Training history saved to: {history_path}")
 
 
 if __name__ == '__main__':
