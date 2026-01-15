@@ -178,14 +178,12 @@ class CombinedSOTALoss(nn.Module):
         self.num_classes = num_classes
         
         # Class weights for re-weighting (e.g., [0.1, 1.5, 1.5, 1.0] for [BG, RV, MYO, LV])
-        if class_weights is not None:
-            self.register_buffer('class_weights', torch.tensor(class_weights, dtype=torch.float32))
-        else:
-            self.class_weights = None
+        # Store as list, convert to tensor on correct device during forward
+        self._class_weights_list = class_weights
         
-        # Initialize losses with class weights
-        self.ce = nn.CrossEntropyLoss(weight=self.class_weights if class_weights else None)
-        self.dice = DiceLoss(class_weights=self.class_weights if class_weights else None)
+        # Initialize losses without weights (weights applied in forward)
+        self.ce = nn.CrossEntropyLoss(reduction='none')  # Apply weight manually
+        self.dice = DiceLoss(class_weights=None)  # Will pass weights in forward
         self.boundary = BoundaryAwareLoss()
         self.focal = FocalLoss() if focal_weight > 0 else None
 
@@ -193,15 +191,29 @@ class CombinedSOTALoss(nn.Module):
         self.current_epoch = epoch
 
     def forward(self, pred, target):
+        device = pred.device
         loss = 0
         losses_dict = {}
         
-        # CE Loss
-        ce = self.ce(pred, target.long())
+        # Get class weights on correct device
+        if self._class_weights_list is not None:
+            class_weights = torch.tensor(self._class_weights_list, dtype=torch.float32, device=device)
+        else:
+            class_weights = None
+        
+        # CE Loss with manual weighting
+        ce_per_pixel = F.cross_entropy(pred, target.long(), reduction='none')
+        if class_weights is not None:
+            # Apply class-specific weights
+            weight_map = class_weights[target.long()]
+            ce = (ce_per_pixel * weight_map).mean()
+        else:
+            ce = ce_per_pixel.mean()
         loss += self.ce_weight * ce
         losses_dict['ce'] = ce.item()
         
-        # Dice Loss
+        # Dice Loss with class weights
+        self.dice.class_weights = class_weights
         dice = self.dice(pred, target)
         loss += self.dice_weight * dice
         losses_dict['dice'] = dice.item()
