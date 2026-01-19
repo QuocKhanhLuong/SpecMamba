@@ -73,7 +73,7 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, scaler=None,
         optimizer.zero_grad()
         
         if use_amp:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 out = model(imgs)['output']
                 loss, _ = criterion(out, masks)
             scaler.scale(loss).backward()
@@ -144,7 +144,7 @@ def main():
     criterion = CombinedSOTALoss(num_classes=14)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
-    scaler = torch.cuda.amp.GradScaler() if args.use_amp else None
+    scaler = torch.amp.GradScaler('cuda') if args.use_amp else None
     
     best_dice = 0
     
