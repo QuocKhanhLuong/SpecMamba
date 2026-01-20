@@ -309,9 +309,11 @@ class HRNetResNet34(nn.Module):
         # DECODER - Aggregate to high resolution
         # =====================================================================
         
+        # Use x1 (highest resolution encoder output) as target size
         high_size = x1.shape[2:]
         
-        d1 = self.decoder_high(x1)
+        # All decoders output to the same high resolution
+        d1 = self.decoder_high(x1, target_size=high_size)  # Already at high_size, but ensure consistency
         d2 = self.decoder_mid1(x2_low, target_size=high_size)
         d3 = self.decoder_mid2(x3_low, target_size=high_size)
         d4 = self.decoder_low(x4_low, target_size=high_size)
