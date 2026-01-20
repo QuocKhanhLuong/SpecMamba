@@ -166,10 +166,13 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4)
     
     # Model Selection
-    parser.add_argument('--base_channels', type=int, default=48, help='HRNetDCN: 32/48/64')
-    parser.add_argument('--use_pointrend', action='store_true', help='Enable PointRend')
-    parser.add_argument('--use_shearlet', action='store_true', help='Enable Shearlet refinement head')
-    parser.add_argument('--no_full_res', action='store_true', help='Disable full resolution mode (faster, less VRAM)')
+    parser.add_argument('--model', type=str, default='hrnet_dcn', 
+                        choices=['hrnet_dcn', 'hrnet_resnet34'],
+                        help='Model architecture: hrnet_dcn (default) or hrnet_resnet34')
+    parser.add_argument('--base_channels', type=int, default=48, help='Base channels (32/48/64)')
+    parser.add_argument('--use_pointrend', action='store_true', help='Enable PointRend (hrnet_dcn only)')
+    parser.add_argument('--use_shearlet', action='store_true', help='Enable Shearlet head (hrnet_dcn only)')
+    parser.add_argument('--no_full_res', action='store_true', help='Disable full resolution mode')
     
     # Training
     parser.add_argument('--epochs', type=int, default=150)
@@ -210,16 +213,27 @@ def main():
     num_classes = 4
     in_channels = 3
     
-    from models.hrnet_dcn import HRNetDCN
-    model = HRNetDCN(
-        in_channels=in_channels,
-        num_classes=num_classes,
-        base_channels=args.base_channels,
-        use_pointrend=args.use_pointrend,
-        full_resolution_mode=not args.no_full_res,
-        deep_supervision=args.deep_supervision,
-        use_shearlet=args.use_shearlet
-    ).to(device)
+    if args.model == 'hrnet_dcn':
+        from models.hrnet_dcn import HRNetDCN
+        model = HRNetDCN(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            base_channels=args.base_channels,
+            use_pointrend=args.use_pointrend,
+            full_resolution_mode=not args.no_full_res,
+            deep_supervision=args.deep_supervision,
+            use_shearlet=args.use_shearlet
+        ).to(device)
+        model_name = f"HRNetDCN-C{args.base_channels}"
+    elif args.model == 'hrnet_resnet34':
+        from models.hrnet_resnet34 import HRNetResNet34
+        model = HRNetResNet34(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            base_channels=args.base_channels,
+            use_deep_supervision=args.deep_supervision
+        ).to(device)
+        model_name = f"HRNetResNet34-C{args.base_channels}"
     
     params = sum(p.numel() for p in model.parameters())
     
