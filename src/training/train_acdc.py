@@ -225,15 +225,7 @@ def main():
             use_shearlet=args.use_shearlet
         ).to(device)
         model_name = f"HRNetDCN-C{args.base_channels}"
-    elif args.model == 'hrnet_resnet34':
-        from models.hrnet_resnet34 import HRNetResNet34
-        model = HRNetResNet34(
-            in_channels=in_channels,
-            num_classes=num_classes,
-            base_channels=args.base_channels,
-            use_deep_supervision=args.deep_supervision
-        ).to(device)
-        model_name = f"HRNetResNet34-C{args.base_channels}"
+    elif args.model == 'hrnet_resnet34':\n        from models.hrnet_resnet34 import HRNetResNet34\n        model = HRNetResNet34(\n            in_channels=in_channels,\n            num_classes=num_classes,\n            base_channels=args.base_channels,\n            use_deep_supervision=args.deep_supervision,\n            full_resolution_mode=not args.no_full_res\n        ).to(device)\n        model_name = f\"HRNetResNet34-C{args.base_channels}\"
     
     params = sum(p.numel() for p in model.parameters())
     

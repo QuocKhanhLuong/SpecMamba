@@ -154,23 +154,38 @@ class HRNetResNet34(nn.Module):
     """
     
     def __init__(self, in_channels=3, num_classes=4, base_channels=64, 
-                 encoder_depths=[3, 4, 6, 3], use_deep_supervision=False):
+                 encoder_depths=[3, 4, 6, 3], use_deep_supervision=False,
+                 full_resolution_mode=False):
         super().__init__()
         
         self.num_classes = num_classes
         self.use_deep_supervision = use_deep_supervision
+        self.full_resolution_mode = full_resolution_mode
         
         C = base_channels  # 64 default (like ResNet-34)
         
         # =====================================================================
-        # STEM (stride 4: 224 -> 56)
+        # STEM 
         # =====================================================================
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, C, 7, stride=2, padding=3, bias=False),
-            get_norm(C),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(3, stride=2, padding=1)
-        )
+        if full_resolution_mode:
+            # Full Resolution Stem (stride=1) - keeps 224x224 in stream 1
+            print(">>> FULL RESOLUTION MODE: Stream 1 keeps 224x224. High VRAM!")
+            self.stem = nn.Sequential(
+                nn.Conv2d(in_channels, C//2, 3, stride=1, padding=1, bias=False),
+                get_norm(C//2),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(C//2, C, 3, stride=1, padding=1, bias=False),
+                get_norm(C),
+                nn.ReLU(inplace=True),
+            )
+        else:
+            # Standard Stem (stride 4: 224 -> 56)
+            self.stem = nn.Sequential(
+                nn.Conv2d(in_channels, C, 7, stride=2, padding=3, bias=False),
+                get_norm(C),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(3, stride=2, padding=1)
+            )
         
         # =====================================================================
         # ENCODER - ResNet-34 style (Asymmetric: Heavier)
