@@ -137,7 +137,7 @@ def evaluate_3d(model, dataset, device, num_classes=4, use_tta=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test HRNetDCN with 3D metrics on ACDC")
+    parser = argparse.ArgumentParser(description="Test with 3D metrics on ACDC")
     
     # Required
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
@@ -146,10 +146,13 @@ def main():
     parser.add_argument('--data_dir', type=str, default='preprocessed_data/ACDC/testing',
                         help='Path to test data directory')
     
-    # Model config (should match training)
-    parser.add_argument('--base_channels', type=int, default=48, help='HRNetDCN base channels (32/48/64)')
-    parser.add_argument('--use_pointrend', action='store_true', help='Enable PointRend')
-    parser.add_argument('--use_shearlet', action='store_true', help='Enable Shearlet head')
+    # Model selection
+    parser.add_argument('--model', type=str, default='hrnet_dcn',
+                        choices=['hrnet_dcn', 'hrnet_resnet34'],
+                        help='Model architecture')
+    parser.add_argument('--base_channels', type=int, default=48, help='Base channels (32/48/64)')
+    parser.add_argument('--use_pointrend', action='store_true', help='Enable PointRend (hrnet_dcn only)')
+    parser.add_argument('--use_shearlet', action='store_true', help='Enable Shearlet head (hrnet_dcn only)')
     parser.add_argument('--no_full_res', action='store_true', help='Disable full resolution mode')
     parser.add_argument('--deep_supervision', action='store_true', help='Enable deep supervision')
     
@@ -163,7 +166,7 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     print(f"\n{'='*70}")
-    print("HRNetDCN 3D Test Evaluation - ACDC")
+    print(f"3D Test Evaluation - ACDC ({args.model})")
     print(f"{'='*70}")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Data:       {args.data_dir}")
@@ -171,27 +174,37 @@ def main():
     print(f"TTA:        {'✓' if args.use_tta else '✗'}")
     
     # Load model
-    from models.hrnet_dcn import HRNetDCN
-    
     num_classes = 4
     in_channels = 3
     
-    model = HRNetDCN(
-        in_channels=in_channels,
-        num_classes=num_classes,
-        base_channels=args.base_channels,
-        use_pointrend=args.use_pointrend,
-        full_resolution_mode=not args.no_full_res,
-        deep_supervision=args.deep_supervision,
-        use_shearlet=args.use_shearlet
-    ).to(device)
+    if args.model == 'hrnet_dcn':
+        from models.hrnet_dcn import HRNetDCN
+        model = HRNetDCN(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            base_channels=args.base_channels,
+            use_pointrend=args.use_pointrend,
+            full_resolution_mode=not args.no_full_res,
+            deep_supervision=args.deep_supervision,
+            use_shearlet=args.use_shearlet
+        ).to(device)
+        model_name = "HRNetDCN"
+    elif args.model == 'hrnet_resnet34':
+        from models.hrnet_resnet34 import HRNetResNet34
+        model = HRNetResNet34(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            base_channels=args.base_channels,
+            use_deep_supervision=args.deep_supervision,
+            full_resolution_mode=not args.no_full_res
+        ).to(device)
+        model_name = "HRNetResNet34"
     
     params = sum(p.numel() for p in model.parameters())
     print(f"\nModel Config:")
+    print(f"  Model:          {model_name}")
     print(f"  Base Channels:  {args.base_channels}")
     print(f"  Parameters:     {params:,}")
-    print(f"  PointRend:      {'✓' if args.use_pointrend else '✗'}")
-    print(f"  Shearlet:       {'✓' if args.use_shearlet else '✗'}")
     print(f"  Full Res Mode:  {'✓' if not args.no_full_res else '✗'}")
     
     # Load checkpoint
