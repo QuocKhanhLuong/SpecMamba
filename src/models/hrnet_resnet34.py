@@ -58,6 +58,225 @@ class BasicBlock(nn.Module):
 
 
 # =============================================================================
+# DECOUPLED SPATIAL-CHANNEL BLOCKS (Spectral & Mamba)
+# =============================================================================
+
+class FourierSpatialMixer(nn.Module):
+    """Global Spatial Mixing via FFT (Con đường 1)."""
+    def __init__(self, dim, modes=16):
+        super().__init__()
+        self.modes = modes
+        # Complex weights for spatial frequencies
+        self.weights = nn.Parameter(torch.empty(dim, modes, modes, 2))
+        scale = 1 / (dim * modes * modes)
+        nn.init.normal_(self.weights, std=scale)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x_ft = torch.fft.rfft2(x, norm='ortho')
+        out_ft = torch.zeros_like(x_ft)
+        
+        m1 = min(self.modes, H // 2 + 1)
+        m2 = min(self.modes, W // 2 + 1)
+        
+        weights = torch.view_as_complex(self.weights)
+        w_curr = weights[:, :m1, :m2]
+        
+        # Multiply only the lower frequencies
+        out_ft[:, :, :m1, :m2] = x_ft[:, :, :m1, :m2] * w_curr
+        
+        x = torch.fft.irfft2(out_ft, s=(H, W), norm='ortho')
+        return x
+
+
+class SpectralDecoupledBlock(nn.Module):
+    """
+    Decouples Spatial and Channel Mixing using FFT.
+    - 1x1 Conv (Channel Mix 1)
+    - Fourier Spatial Mixer (Spatial Mix)
+    - 1x1 Conv (Channel Mix 2)
+    """
+    def __init__(self, in_channels, out_channels, stride=1, downsample=None):
+        super().__init__()
+        self.downsample = downsample
+        self.stride = stride
+        
+        # Channel Mix 1
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.norm1 = get_norm(out_channels)
+        self.act1 = nn.GELU()
+        
+        # Spatial Mix (FFT)
+        self.spatial_mixer = FourierSpatialMixer(out_channels, modes=16)
+        
+        # Channel Mix 2
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 1, bias=False)
+        self.norm2 = get_norm(out_channels)
+        
+        # Handle stride if needed (FFT requires same dims, so we handle stride via downsample path and pooling before FFT)
+        self.pool = nn.AvgPool2d(2, 2) if stride > 1 else nn.Identity()
+
+    def forward(self, x):
+        identity = x
+        
+        # Channel mix 1
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.act1(out)
+        
+        # Pool if stride > 1
+        out = self.pool(out)
+        
+        # Spatial Mix
+        shortcut = out
+        out = self.spatial_mixer(out) + shortcut
+        
+        # Channel mix 2
+        out = self.conv2(out)
+        out = self.norm2(out)
+        
+        if self.downsample is not None:
+            identity = self.downsample(x)
+            
+        out += identity
+        out = self.act1(out)
+        return out
+
+
+try:
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+    HAS_MAMBA = True
+except ImportError:
+    HAS_MAMBA = False
+    def selective_scan_fn(u, delta, A, B_mat, C_mat, D=None, z=None, delta_bias=None, delta_softplus=False, return_last_state=False):
+        """Pure PyTorch fallback mock for shape testing when mamba_ssm is not installed."""
+        return u.clone()
+
+class SimpleMambaBlock(nn.Module):
+    """
+    Lite-Mamba Block: Spatial Mixing via Vanilla SSM with Expansion=1 and no Conv1D.
+    Designed specifically for Medical Image Decoupling, avoiding NLP overhead.
+    """
+    def __init__(self, dim, d_state=16):
+        super().__init__()
+        self.dim = dim
+        self.d_state = d_state
+        
+        # 1. Linear projection to create x, delta, B, C completely without Expansion
+        # Total added dims = dim*2 + d_state*2 (x, delta, B, C)
+        self.proj = nn.Linear(dim, dim * 2 + 2 * d_state)
+        
+        # A matrix: (dim, d_state) - HiPPO or random init. Usually kept negative for stability.
+        self.A_log = nn.Parameter(torch.log(torch.rand(dim, d_state) + 1e-4))
+        
+        # D matrix mapping (skip connection inside Mamba)
+        self.D = nn.Parameter(torch.ones(dim))
+        
+        # DT Bias (delta bias)
+        self.dt_proj_bias = nn.Parameter(torch.zeros(dim))
+
+        # 2. Output Linear
+        self.out_proj = nn.Linear(dim, dim)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        L = H * W
+        
+        # Sequence format: (B, L, C)
+        seq = x.view(B, C, L).transpose(1, 2)
+        
+        # 1. Linear projection
+        proj_out = self.proj(seq) # (B, L, dim*2 + 2*d_state)
+        
+        # Split into x_in, delta, B_mat, C_mat
+        x_in, delta, B_mat, C_mat = torch.split(
+            proj_out, 
+            [self.dim, self.dim, self.d_state, self.d_state], 
+            dim=-1
+        )
+        
+        # Mamba's core function expects inputs in shape (B, D, L) or (B, N, L)
+        x_in = x_in.transpose(1, 2).contiguous() # (B, dim, L)
+        delta = delta.transpose(1, 2).contiguous() # (B, dim, L)
+        B_mat = B_mat.transpose(1, 2).contiguous() # (B, d_state, L)
+        C_mat = C_mat.transpose(1, 2).contiguous() # (B, d_state, L)
+        
+        A = -torch.exp(self.A_log) # Keep A negative, shape (dim, d_state)
+        
+        # 2. Selective Scan
+        if HAS_MAMBA:
+            y = selective_scan_fn(
+                x_in, delta, A, B_mat, C_mat,
+                D=self.D, z=None, delta_bias=self.dt_proj_bias, delta_softplus=True
+            ) # y: (B, dim, L)
+        else:
+            # Fallback mock for testing dimensions without Mamba installed
+            import torch.nn.functional as F
+            y = x_in * F.softplus(delta) # Just a dimension-preserving mock operation
+        
+        # 3. Output projection
+        y = y.transpose(1, 2) # (B, L, dim)
+        out = self.out_proj(y)
+        
+        # Back to image shape
+        out = out.transpose(1, 2).view(B, C, H, W)
+        return out
+
+
+class MambaDecoupledBlock(nn.Module):
+    """
+    Decouples Spatial and Channel Mixing using SSM.
+    - 1x1 Conv (Channel Mix 1)
+    - SimpleSSM (Spatial Mix)
+    - 1x1 Conv (Channel Mix 2)
+    """
+    def __init__(self, in_channels, out_channels, stride=1, downsample=None):
+        super().__init__()
+        self.downsample = downsample
+        self.stride = stride
+        
+        # Channel Mix 1
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.norm1 = get_norm(out_channels)
+        self.act1 = nn.GELU()
+        
+        # Spatial Mix (Lite-Mamba SSM)
+        self.spatial_mixer = SimpleMambaBlock(out_channels)
+        
+        # Channel Mix 2
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 1, bias=False)
+        self.norm2 = get_norm(out_channels)
+        
+        self.pool = nn.AvgPool2d(2, 2) if stride > 1 else nn.Identity()
+
+    def forward(self, x):
+        identity = x
+        
+        # Channel mix 1
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.act1(out)
+        
+        # Pool if stride > 1
+        out = self.pool(out)
+        
+        # Spatial Mix
+        shortcut = out
+        out = self.spatial_mixer(out) + shortcut
+        
+        # Channel mix 2
+        out = self.conv2(out)
+        out = self.norm2(out)
+        
+        if self.downsample is not None:
+            identity = self.downsample(x)
+            
+        out += identity
+        out = self.act1(out)
+        return out
+
+
+# =============================================================================
 # LIGHTWEIGHT DECODER BLOCK
 # =============================================================================
 
@@ -155,12 +374,13 @@ class HRNetResNet34(nn.Module):
     
     def __init__(self, in_channels=3, num_classes=4, base_channels=64, 
                  encoder_depths=[3, 4, 6, 3], use_deep_supervision=False,
-                 full_resolution_mode=False):
+                 full_resolution_mode=False, block_type='basic'):
         super().__init__()
         
         self.num_classes = num_classes
         self.use_deep_supervision = use_deep_supervision
         self.full_resolution_mode = full_resolution_mode
+        self.block_type = block_type
         
         C = base_channels  # 64 default (like ResNet-34)
         
@@ -264,7 +484,7 @@ class HRNetResNet34(nn.Module):
         self._init_weights()
     
     def _make_layer(self, in_channels, out_channels, num_blocks, stride=1):
-        """Create a stage with multiple BasicBlocks."""
+        """Create a stage with multiple Blocks."""
         downsample = None
         if stride != 1 or in_channels != out_channels:
             downsample = nn.Sequential(
@@ -272,9 +492,18 @@ class HRNetResNet34(nn.Module):
                 get_norm(out_channels)
             )
         
-        layers = [BasicBlock(in_channels, out_channels, stride, downsample)]
+        if self.block_type == 'basic':
+            block_cls = BasicBlock
+        elif self.block_type == 'spectral':
+            block_cls = SpectralDecoupledBlock
+        elif self.block_type == 'mamba':
+            block_cls = MambaDecoupledBlock
+        else:
+            raise ValueError(f"Unknown block_type: {self.block_type}")
+
+        layers = [block_cls(in_channels, out_channels, stride, downsample)]
         for _ in range(1, num_blocks):
-            layers.append(BasicBlock(out_channels, out_channels))
+            layers.append(block_cls(out_channels, out_channels))
         
         return nn.Sequential(*layers)
     
@@ -386,6 +615,28 @@ def hrnet_resnet34_large(num_classes=4, in_channels=3):
         num_classes=num_classes,
         base_channels=64,
         encoder_depths=[3, 4, 23, 3]  # Like ResNet-101 depth
+    )
+
+
+def hrnet_spectral_decoupled(num_classes=4, in_channels=3):
+    """Spectral Decoupled (Fast Fourier Transform + Linear)"""
+    return HRNetResNet34(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        base_channels=64,
+        encoder_depths=[3, 4, 6, 3],
+        block_type='spectral'
+    )
+
+
+def hrnet_mamba_decoupled(num_classes=4, in_channels=3):
+    """Mamba Decoupled (SSM Scan + Linear)"""
+    return HRNetResNet34(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        base_channels=64,
+        encoder_depths=[3, 4, 6, 3],
+        block_type='mamba'
     )
 
 
