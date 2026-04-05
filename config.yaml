@@ -1,7 +1,8 @@
 # =============================================================================
 # SpecMamba - Master Configuration File
 # =============================================================================
-# Unified config for all training scripts (train_acdc, train_mnm, train_brats, train_synapse)
+# 3-Stream Asymmetric Spec-HRNet: Frequency-Guided Medical Image Segmentation
+# Model choices: specmamba | hrnet_dcn | hrnet_resnet34 | pcshear_hrnet
 # =============================================================================
 
 # Quick preset - override individual settings below if needed
@@ -12,12 +13,35 @@ preset: "sota"
 # MODEL CONFIGURATION
 # =============================================================================
 model:
-  name: "HRNetDCN"               # "HRNetDCN" or "EGMNet" (legacy)
+  name: "specmamba"              # specmamba | hrnet_dcn | hrnet_resnet34 | pcshear_hrnet
   
   # Common settings
   img_size: 224                  # Input image size
   
-  # HRNet DCN Settings
+  # SpecMamba (3-Stream Asymmetric Spec-HRNet)
+  specmamba:
+    base_channels: 48            # 32=small, 48=base, 64=large
+    num_modes: 32                # FFT mode count for AdaptiveFourierMixer
+    blocks_per_stage: 2          # Blocks per stream per stage
+    num_stages: 3                # Number of parallel processing stages
+    deep_supervision: true       # Aux heads from fused HR after stage 1,2
+    
+    # Architecture Summary (C=48):
+    # FR Stream (224², DWConv):     122K params — local edge refinement
+    # HR Stream (112², FFT):        605K params — global spectral mixing
+    # LR Stream (56², CrossScan):   170K params — sequential context
+    # TriFuse (5-path cross-fuse):  396K params — all-to-all minus LR→FR
+    # AsymSkipAttn (3 types):        25K params — stream-specific denoising
+    # Total:                       ~1.42M params
+    
+    # Prior Knowledge Input: Raw + Sobel Edge + Local Variance (3 channels)
+    # Asymmetric Skip Attention:
+    #   FR: CBAM-lite (spatial + channel) — MRI artifact removal
+    #   HR: FreqEnergy weighting + spatial — FFT ringing suppression
+    #   LR: Uncertainty-guided confidence — Mamba hallucination suppression
+    # TriStream Fusion: Separate gate_hr + gate_lr (frequency-specific gating)
+  
+  # HRNet DCN Settings (legacy baseline)
   hrnet_dcn:
     base_channels: 48            # 32=small, 48=base, 64=large
     use_pointrend: true          # PointRend for boundary refinement
@@ -51,7 +75,7 @@ datasets:
     in_channels: 3
     num_classes: 4
     class_names: ["BG", "LV", "MYO", "RV"]
-    root: "preprocessed_data/MnM"
+    root: "preprocessed_data/mnm"   # lowercase - matches preprocess_mnm.py output
     train_dir: "training"
     test_dir: "testing"
     
@@ -89,7 +113,7 @@ data:
 # =============================================================================
 training:
   # Basic
-  epochs: 150
+  epochs: 200
   batch_size: 8                  # Reduce for BraTS (4 channels)
   num_workers: 4
   
@@ -101,8 +125,8 @@ training:
   # Scheduler
   scheduler: "cosine"
   scheduler_params:
-    T_max: 150
-    eta_min: 1e-6
+    T_max: 200
+    eta_min: 1e-7
     
   # Training Techniques
   grad_clip: 1.0
@@ -138,8 +162,8 @@ evaluation:
 # OUTPUT CONFIGURATION
 # =============================================================================
 output:
-  save_dir: "weights"
-  exp_name: null                 # Auto-generate if null
+  save_dir: "weights"            # train_acdc.py default: 'weights'
+  exp_name: null                 # Auto-generate: acdc_{model}_c{channels}_{MMDD_HHMM}
   save_best: true
   save_last: true
 
@@ -147,20 +171,23 @@ output:
 # PRESETS
 # =============================================================================
 # baseline:
-#   model.hrnet_dcn.base_channels: 32
-#   model.hrnet_dcn.use_pointrend: false
+#   model.specmamba.base_channels: 32
+#   model.specmamba.blocks_per_stage: 1
 #   training.use_amp: false
-#   ~10M params
+#   ~500K params, fast iteration
 #
 # lite:
-#   model.hrnet_dcn.base_channels: 32
+#   model.specmamba.base_channels: 32
+#   model.specmamba.blocks_per_stage: 2
 #   training.batch_size: 16
-#   ~10M params, fast training
+#   ~700K params, balanced
 #
 # sota: ★ RECOMMENDED
-#   model.hrnet_dcn.base_channels: 48
-#   model.hrnet_dcn.use_pointrend: true
+#   model.specmamba.base_channels: 48
+#   model.specmamba.blocks_per_stage: 2
+#   model.specmamba.num_stages: 3
+#   model.specmamba.deep_supervision: true
 #   loss.boundary_weight: 0.5
 #   training.use_amp: true
-#   ~25M params, best accuracy
+#   ~1.42M params, best accuracy
 # =============================================================================

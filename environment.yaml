@@ -1,8 +1,8 @@
-# EGM-Net Conda Environment
+# SpecMamba Conda Environment
 # Usage: conda env create -f environment.yaml
-# Activate: conda activate egm-net
+# Activate: conda activate specmamba
 
-name: egm-net
+name: specmamba
 
 channels:
   - pytorch
@@ -51,4 +51,6 @@ dependencies:
     - einops>=0.6
     - timm>=0.9
     - albumentations>=1.3
-    - medpy
+    - medpy>=0.4
+    # mamba-ssm requires CUDA toolkit; install manually if needed:
+    # pip install mamba-ssm causal-conv1d

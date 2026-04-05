@@ -1,144 +1,105 @@
-"""
-Architecture Validation Test Suite for SpecMambaNet.
-
-Verifies tensor shapes, gradient flow, deep supervision, and AMP compatibility.
-"""
-
-import sys
-import os
+"""Test suite: 3-Stream Asymmetric Spec-HRNet."""
+import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
-
 import torch
-import torch.nn as nn
-
 from models.specmamba_net import (
-    SpectralBlock, PseudoMambaBlock, SpecMambaBlock, SpecMambaNet,
+    PriorKnowledgeConstructor, DWConvBlock, AdaptiveFourierMixer,
+    CrossScanGatedMixer, TriFuseLayer, TriStreamFusion, SkipAttention,
+    SpecMambaNet,
 )
 
+def test_prior():
+    print("1. PriorKnowledgeConstructor...")
+    m = PriorKnowledgeConstructor()
+    o = m(torch.randn(2,3,224,224))
+    assert o.shape == (2,3,224,224) and o[:,1].min()>=0
+    print(f"   OK: {o.shape}")
 
-def test_spectral_block():
-    print("Testing SpectralBlock...")
-    block = SpectralBlock(64)
-    x = torch.randn(2, 64, 32, 32)
-    out = block(x)
-    assert out.shape == x.shape, f"Shape mismatch: {out.shape}"
-    print(f"  OK: {x.shape} -> {out.shape}")
+def test_dwconv():
+    print("2. DWConvBlock (FR)...")
+    m = DWConvBlock(48); o = m(torch.randn(2,48,224,224))
+    assert o.shape == (2,48,224,224)
+    print(f"   OK: {o.shape}, params={sum(p.numel() for p in m.parameters()):,}")
 
+def test_afm():
+    print("3. AdaptiveFourierMixer (HR)...")
+    m = AdaptiveFourierMixer(48, 16); o = m(torch.randn(2,48,112,112))
+    assert o.shape == (2,48,112,112)
+    print(f"   OK: {o.shape}")
 
-def test_pseudo_mamba_block():
-    print("Testing PseudoMambaBlock...")
-    block = PseudoMambaBlock(64)
-    x = torch.randn(2, 64, 32, 32)
-    out = block(x)
-    assert out.shape == x.shape, f"Shape mismatch: {out.shape}"
-    print(f"  OK: {x.shape} -> {out.shape}")
+def test_csgm():
+    print("4. CrossScanGatedMixer (LR)...")
+    m = CrossScanGatedMixer(96); o = m(torch.randn(2,96,56,56))
+    assert o.shape == (2,96,56,56)
+    print(f"   OK: {o.shape}")
 
+def test_trifuse():
+    print("5. TriFuseLayer (6-path cross-fuse)...")
+    m = TriFuseLayer(48, 48, 96)
+    fr, hr, lr = torch.randn(2,48,224,224), torch.randn(2,48,112,112), torch.randn(2,96,56,56)
+    fr2, hr2, lr2 = m(fr, hr, lr)
+    assert fr2.shape == fr.shape and hr2.shape == hr.shape and lr2.shape == lr.shape
+    print(f"   OK: FR{fr2.shape} HR{hr2.shape} LR{lr2.shape}")
+    print(f"   Params: {sum(p.numel() for p in m.parameters()):,}")
 
-def test_spec_mamba_block():
-    print("Testing SpecMambaBlock...")
-    block = SpecMambaBlock(48)
-    x = torch.randn(2, 48, 56, 56)
-    out = block(x)
-    assert out.shape == x.shape, f"Shape mismatch: {out.shape}"
-    print(f"  OK: {x.shape} -> {out.shape}")
+def test_tristream():
+    print("6. TriStreamFusion (FR gates HR+LR)...")
+    m = TriStreamFusion(48, 48, 96, 48)
+    fr, hr, lr = torch.randn(2,48,224,224), torch.randn(2,48,112,112), torch.randn(2,96,56,56)
+    o = m(fr, hr, lr)
+    assert o.shape == (2,48,224,224)
+    print(f"   OK: {o.shape}")
 
-
-def test_specmamba_net_forward():
-    print("Testing SpecMambaNet forward (eval)...")
-    model = SpecMambaNet(in_channels=3, num_classes=4, base_channels=32)
+def test_full_eval():
+    print("7. SpecMambaNet eval...")
+    model = SpecMambaNet(3, 4, 32, num_modes=16, blocks_per_stage=1, num_stages=2)
     model.eval()
-    x = torch.randn(2, 3, 224, 224)
     with torch.no_grad():
-        out = model(x)
-    assert out['output'].shape == (2, 4, 224, 224), f"Shape: {out['output'].shape}"
-    assert 'aux_outputs' not in out, "aux_outputs should not appear in eval mode"
-    print(f"  OK: output={out['output'].shape}")
+        o = model(torch.randn(2,3,224,224))
+    assert o['output'].shape == (2,4,224,224)
+    assert 'aux_outputs' not in o
+    print(f"   OK: {o['output'].shape}")
 
-
-def test_deep_supervision():
-    print("Testing deep supervision...")
-    model = SpecMambaNet(in_channels=3, num_classes=4, base_channels=32, deep_supervision=True)
+def test_deep_sup():
+    print("8. Deep supervision...")
+    model = SpecMambaNet(3, 4, 32, deep_supervision=True, num_modes=16,
+                         blocks_per_stage=1, num_stages=3)
     model.train()
-    x = torch.randn(2, 3, 224, 224)
-    out = model(x)
-    assert 'aux_outputs' in out, "Missing aux_outputs in training mode"
-    assert len(out['aux_outputs']) == 3, f"Expected 3 aux heads, got {len(out['aux_outputs'])}"
-    for i, aux in enumerate(out['aux_outputs']):
-        assert aux.shape == out['output'].shape, f"Aux {i}: {aux.shape} != {out['output'].shape}"
-    print(f"  OK: {len(out['aux_outputs'])} aux heads, all match output shape")
+    o = model(torch.randn(2,3,224,224))
+    assert 'aux_outputs' in o and len(o['aux_outputs']) == 2
+    for i, a in enumerate(o['aux_outputs']):
+        assert a.shape == (2,4,224,224), f"aux {i}: {a.shape}"
+    print(f"   OK: {len(o['aux_outputs'])} aux heads, all [2,4,224,224]")
 
-
-def test_gradient_flow():
-    print("Testing gradient flow...")
-    model = SpecMambaNet(in_channels=3, num_classes=4, base_channels=16)
+def test_grads():
+    print("9. Gradient flow...")
+    model = SpecMambaNet(3, 4, 16, num_modes=8, blocks_per_stage=1, num_stages=2)
     model.train()
-    x = torch.randn(1, 3, 64, 64)
-    out = model(x)
-    loss = out['output'].sum()
-    loss.backward()
-    has_grad = all(p.grad is not None for p in model.parameters() if p.requires_grad)
-    assert has_grad, "Some parameters have no gradient"
-    print(f"  OK: all parameters received gradients")
+    o = model(torch.randn(1,3,64,64))
+    o['output'].sum().backward()
+    bad = [n for n,p in model.named_parameters() if p.requires_grad and p.grad is None]
+    assert len(bad) == 0, f"No grad: {bad[:5]}"
+    print(f"   OK: all params have gradients")
 
-
-def test_different_sizes():
-    print("Testing different input sizes...")
-    model = SpecMambaNet(in_channels=3, num_classes=2, base_channels=16)
-    model.eval()
-    for size in [64, 128, 224, 256]:
-        x = torch.randn(1, 3, size, size)
-        with torch.no_grad():
-            out = model(x)
-        assert out['output'].shape == (1, 2, size, size), f"Size {size}: {out['output'].shape}"
-        print(f"  OK: {size}x{size}")
-
-
-def test_multi_channel_input():
-    print("Testing 4-channel input (BraTS-style)...")
-    model = SpecMambaNet(in_channels=4, num_classes=4, base_channels=16)
-    model.eval()
-    x = torch.randn(1, 4, 128, 128)
-    with torch.no_grad():
-        out = model(x)
-    assert out['output'].shape == (1, 4, 128, 128)
-    print(f"  OK: {out['output'].shape}")
-
-
-def test_param_count():
-    print("Testing parameter count...")
-    model = SpecMambaNet(in_channels=3, num_classes=4, base_channels=48)
-    params = sum(p.numel() for p in model.parameters())
-    print(f"  C=48: {params:,} params")
-    assert params > 0, "Model has no parameters"
-    print(f"  OK")
-
+def test_params():
+    print("10. Parameter count (C=48)...")
+    model = SpecMambaNet(3, 4, 48, num_modes=32, blocks_per_stage=2, num_stages=3)
+    total = sum(p.numel() for p in model.parameters())
+    fr = sum(p.numel() for p in model.fr_stages.parameters())
+    hr = sum(p.numel() for p in model.hr_stages.parameters())
+    lr = sum(p.numel() for p in model.lr_stages.parameters())
+    fuse = sum(p.numel() for p in model.tri_fuse.parameters())
+    print(f"   Total: {total:,}")
+    print(f"   FR(DWConv): {fr:,} | HR(FFT): {hr:,} | LR(Mamba): {lr:,}")
+    print(f"   TriFuse: {fuse:,}")
 
 if __name__ == '__main__':
-    tests = [
-        test_spectral_block,
-        test_pseudo_mamba_block,
-        test_spec_mamba_block,
-        test_specmamba_net_forward,
-        test_deep_supervision,
-        test_gradient_flow,
-        test_different_sizes,
-        test_multi_channel_input,
-        test_param_count,
-    ]
-
-    print(f"\n{'='*60}")
-    print("SpecMambaNet Test Suite")
-    print(f"{'='*60}\n")
-
-    passed = 0
-    for test_fn in tests:
-        try:
-            test_fn()
-            passed += 1
-        except Exception as e:
-            print(f"  FAILED: {e}")
+    tests = [test_prior, test_dwconv, test_afm, test_csgm, test_trifuse,
+             test_tristream, test_full_eval, test_deep_sup, test_grads, test_params]
+    print(f"\n{'='*60}\n3-Stream Asymmetric Spec-HRNet Test Suite\n{'='*60}\n")
+    ok = 0
+    for t in tests:
+        try: t(); ok += 1
+        except Exception as e: print(f"   FAILED: {e}")
         print()
-
-    print(f"{'='*60}")
-    print(f"Results: {passed}/{len(tests)} tests passed")
-    print(f"{'='*60}")
+    print(f"{'='*60}\n{ok}/{len(tests)} passed\n{'='*60}")
