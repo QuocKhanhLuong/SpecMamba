@@ -6,6 +6,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,11 +19,293 @@ from scipy.ndimage import distance_transform_edt, binary_erosion
 from datetime import datetime
 import json
 import glob
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 from data.acdc_dataset import ACDCDataset2D, ACDCDataset2DAugmented
 from losses.sota_loss import CombinedSOTALoss
 
 CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
+
+
+# ── Reproducibility & config helpers ────────────────────────────────────────
+
+CONFIG_SECTIONS = {
+    'experiment', 'data', 'model', 'training', 'loss', 'split', 'output',
+    'evaluation', 'reproducibility',
+}
+
+
+def load_training_config(config_path):
+    """Load a YAML/JSON config and flatten known experiment sections."""
+    if config_path is None:
+        return {}
+
+    path = Path(config_path)
+    with open(path) as f:
+        if path.suffix.lower() in {'.yaml', '.yml'}:
+            if yaml is None:
+                raise ImportError("PyYAML is required for YAML config files.")
+            raw = yaml.safe_load(f) or {}
+        else:
+            raw = json.load(f)
+
+    flat = {}
+    for key, value in raw.items():
+        if key in CONFIG_SECTIONS and isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                if key == 'experiment' and nested_key == 'name':
+                    flat['exp_name'] = nested_value
+                else:
+                    flat[nested_key] = nested_value
+        else:
+            flat[key] = value
+    if isinstance(flat.get('class_weights'), list):
+        flat['class_weights'] = ','.join(str(v) for v in flat['class_weights'])
+    return flat
+
+
+def build_arg_parser(config_defaults=None):
+    parser = argparse.ArgumentParser(description="ACDC Training")
+
+    parser.add_argument('--config', type=str, default=None,
+                        help='YAML/JSON experiment config.')
+    parser.add_argument('--data_dir', type=str, default='preprocessed_data/ACDC')
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--num_workers', type=int, default=4)
+
+    parser.add_argument('--model', type=str, default='asym_spec_mamba',
+                        choices=['specmamba', 'asym_spec_mamba', 'hrnet_dcn', 'hrnet_resnet34'])
+    parser.add_argument('--base_channels', type=int, default=48)
+    parser.add_argument('--use_pointrend', action='store_true')
+    parser.add_argument('--use_shearlet', action='store_true')
+    parser.add_argument('--no_full_res', action='store_true')
+
+    parser.add_argument('--epochs', type=int, default=250)
+    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--weight_decay', type=float, default=1e-5)
+    parser.add_argument('--warmup_epochs', type=int, default=10)
+    parser.add_argument('--early_stop', type=int, default=30)
+    parser.add_argument('--use_amp', action='store_true')
+    parser.add_argument('--augment', action='store_true')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--deterministic', action='store_true')
+
+    parser.add_argument('--boundary_weight', type=float, default=1.5)
+    parser.add_argument('--dice_weight', type=float, default=1.0)
+    parser.add_argument('--ce_weight', type=float, default=0.5)
+    parser.add_argument('--focal_weight', type=float, default=0.5)
+    parser.add_argument('--deep_supervision', action='store_true')
+    parser.add_argument('--class_weights', type=str, default='0.1,2.5,1.5,1.0')
+    parser.add_argument('--no_class_weights', action='store_true')
+
+    parser.add_argument('--train_fraction', type=float, default=0.8)
+    parser.add_argument('--split_manifest', type=str, default='splits/acdc_patient_split_seed42.json',
+                        help='Path to save/load patient-level train/val split manifest.')
+    parser.add_argument('--overwrite_split', action='store_true',
+                        help='Regenerate split_manifest instead of reusing an existing one.')
+
+    parser.add_argument('--hd95_unit', type=str, default='auto',
+                        choices=['auto', 'mm', 'pixel'])
+    parser.add_argument('--save_dir', type=str, default='weights')
+    parser.add_argument('--exp_name', type=str, default=None)
+
+    if config_defaults:
+        valid_dests = {action.dest for action in parser._actions}
+        unknown = sorted(set(config_defaults) - valid_dests)
+        if unknown:
+            raise ValueError(f"Unknown config keys for train_acdc.py: {unknown}")
+        parser.set_defaults(**config_defaults)
+    return parser
+
+
+def parse_args(argv=None):
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument('--config', type=str, default=None)
+    config_args, _ = config_parser.parse_known_args(argv)
+    config_defaults = load_training_config(config_args.config)
+    parser = build_arg_parser(config_defaults)
+    return parser.parse_args(argv)
+
+
+def seed_everything(seed, deterministic=False):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def acdc_volume_id(path_or_id):
+    return Path(str(path_or_id)).stem
+
+
+def acdc_patient_id(volume_id):
+    return acdc_volume_id(volume_id).split('_')[0]
+
+
+def create_acdc_patient_split_manifest(volume_ids, seed=42, train_fraction=0.8,
+                                       output_path=None):
+    """Create a deterministic patient-level split manifest for ACDC.
+
+    ACDC preprocessing emits one ED and one ES volume per patient. Splitting by
+    patient keeps both frames in the same fold and prevents patient leakage.
+    """
+    if not 0.0 < train_fraction < 1.0:
+        raise ValueError("train_fraction must be in the open interval (0, 1).")
+
+    unique_volume_ids = sorted({acdc_volume_id(v) for v in volume_ids})
+    patient_to_volumes = OrderedDict()
+    for volume_id in unique_volume_ids:
+        patient_to_volumes.setdefault(acdc_patient_id(volume_id), []).append(volume_id)
+
+    patients = list(patient_to_volumes.keys())
+    if len(patients) < 2:
+        raise ValueError("Need at least two ACDC patients for train/val splitting.")
+
+    shuffled = patients.copy()
+    rng = np.random.default_rng(seed)
+    rng.shuffle(shuffled)
+    n_train = int(len(shuffled) * train_fraction)
+    n_train = min(max(n_train, 1), len(shuffled) - 1)
+
+    train_patients = sorted(shuffled[:n_train])
+    val_patients = sorted(shuffled[n_train:])
+
+    def volumes_for(split_patients):
+        vols = []
+        for patient in split_patients:
+            vols.extend(patient_to_volumes[patient])
+        return sorted(vols)
+
+    manifest = {
+        'dataset': 'ACDC',
+        'schema_version': 1,
+        'split_level': 'patient',
+        'patient_id_rule': 'prefix_before_first_underscore',
+        'seed': int(seed),
+        'train_fraction': float(train_fraction),
+        'num_patients': len(patients),
+        'num_volumes': len(unique_volume_ids),
+        'splits': {
+            'train': {
+                'patients': train_patients,
+                'volumes': volumes_for(train_patients),
+            },
+            'val': {
+                'patients': val_patients,
+                'volumes': volumes_for(val_patients),
+            },
+        },
+    }
+
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            json.dump(manifest, f, indent=2)
+    return manifest
+
+
+def load_acdc_split_manifest(manifest_path):
+    with open(manifest_path) as f:
+        manifest = normalize_acdc_split_manifest(json.load(f))
+    if manifest.get('split_level') != 'patient':
+        raise ValueError("ACDC split manifest must have split_level='patient'.")
+    train_patients = set(manifest['splits']['train']['patients'])
+    val_patients = set(manifest['splits']['val']['patients'])
+    overlap = train_patients & val_patients
+    if overlap:
+        raise ValueError(f"Patient leakage in split manifest: {sorted(overlap)}")
+    return manifest
+
+
+def normalize_acdc_split_manifest(manifest):
+    if 'splits' in manifest:
+        for split_name in ('train', 'val'):
+            split = manifest['splits'][split_name]
+            if 'patients' not in split:
+                split['patients'] = sorted({acdc_patient_id(v) for v in split['volumes']})
+        return manifest
+    if manifest.get('split_type') != 'patient':
+        return manifest
+
+    required = {'train_patients', 'val_patients', 'train_volumes', 'val_volumes'}
+    missing = required - set(manifest)
+    if missing:
+        raise ValueError(f"Flat ACDC split manifest missing keys: {sorted(missing)}")
+
+    return {
+        'dataset': manifest.get('dataset', 'ACDC'),
+        'schema_version': manifest.get('schema_version', 1),
+        'split_level': 'patient',
+        'patient_id_rule': manifest.get(
+            'patient_id_rule', 'prefix_before_first_underscore'),
+        'seed': manifest.get('seed'),
+        'train_fraction': manifest.get('train_ratio'),
+        'num_patients': manifest.get(
+            'n_patients',
+            len(set(manifest['train_patients']) | set(manifest['val_patients']))),
+        'num_volumes': manifest.get(
+            'n_volumes',
+            len(set(manifest['train_volumes']) | set(manifest['val_volumes']))),
+        'splits': {
+            'train': {
+                'patients': sorted(manifest['train_patients']),
+                'volumes': sorted(manifest['train_volumes']),
+            },
+            'val': {
+                'patients': sorted(manifest['val_patients']),
+                'volumes': sorted(manifest['val_volumes']),
+            },
+        },
+    }
+
+
+def indices_from_acdc_split_manifest(dataset, manifest):
+    manifest = normalize_acdc_split_manifest(manifest)
+    dataset_volume_ids = [acdc_volume_id(p) for p in dataset.vol_paths]
+    available = set(dataset_volume_ids)
+    train_vols = set(manifest['splits']['train']['volumes'])
+    val_vols = set(manifest['splits']['val']['volumes'])
+    train_patients = set(manifest['splits']['train']['patients'])
+    val_patients = set(manifest['splits']['val']['patients'])
+
+    if train_patients & val_patients:
+        raise ValueError("Patient leakage in split manifest.")
+
+    if train_vols & val_vols:
+        raise ValueError("Volume leakage in split manifest.")
+
+    missing = sorted((train_vols | val_vols) - available)
+    if missing:
+        raise ValueError(f"Split manifest references missing ACDC volumes: {missing}")
+
+    train_idx = [
+        i for i, (vol_idx, _) in enumerate(dataset.index_map)
+        if dataset_volume_ids[vol_idx] in train_vols
+    ]
+    val_idx = [
+        i for i, (vol_idx, _) in enumerate(dataset.index_map)
+        if dataset_volume_ids[vol_idx] in val_vols
+    ]
+    if not train_idx or not val_idx:
+        raise ValueError("ACDC split produced an empty train or validation set.")
+    return train_idx, val_idx
 
 
 # ── 2.5D Dataset ────────────────────────────────────────────────────────────
@@ -153,7 +436,7 @@ class CompoundHDLoss(nn.Module):
         self.focal_gamma = focal_gamma
         self.focal_weight = focal_weight
         self.current_epoch = 0
-        self._cw = class_weights if class_weights is not None else [0.1, 3.0, 1.5, 1.0]
+        self._cw = class_weights if class_weights is not None else [0.1, 2.5, 1.5, 1.0]
         self.mse = nn.MSELoss()
 
     def _w_hd(self):
@@ -378,43 +661,10 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch,
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="ACDC Training")
-
-    parser.add_argument('--data_dir', type=str, default='preprocessed_data/ACDC/training')
-    parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--num_workers', type=int, default=4)
-
-    parser.add_argument('--model', type=str, default='specmamba',
-                        choices=['specmamba', 'asym_spec_mamba', 'hrnet_dcn', 'hrnet_resnet34'])
-    parser.add_argument('--base_channels', type=int, default=48)
-    parser.add_argument('--use_pointrend', action='store_true')
-    parser.add_argument('--use_shearlet', action='store_true')
-    parser.add_argument('--no_full_res', action='store_true')
-
-    parser.add_argument('--epochs', type=int, default=250)
-    parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--weight_decay', type=float, default=1e-5)
-    parser.add_argument('--warmup_epochs', type=int, default=20)
-    parser.add_argument('--early_stop', type=int, default=50)
-    parser.add_argument('--use_amp', action='store_true')
-    parser.add_argument('--augment', action='store_true')
-
-    parser.add_argument('--boundary_weight', type=float, default=1.5)
-    parser.add_argument('--dice_weight', type=float, default=1.0)
-    parser.add_argument('--ce_weight', type=float, default=0.5)
-    parser.add_argument('--focal_weight', type=float, default=0.5)
-    parser.add_argument('--deep_supervision', action='store_true')
-    parser.add_argument('--class_weights', type=str, default='0.1,3.0,1.5,1.0')
-    parser.add_argument('--no_class_weights', action='store_true')
-
-    parser.add_argument('--hd95_unit', type=str, default='auto',
-                        choices=['auto', 'mm', 'pixel'])
-    parser.add_argument('--save_dir', type=str, default='weights')
-    parser.add_argument('--exp_name', type=str, default=None)
-
-    args = parser.parse_args()
+    args = parse_args()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     os.makedirs(args.save_dir, exist_ok=True)
+    seed_everything(args.seed, deterministic=args.deterministic)
 
     if args.exp_name is None:
         args.exp_name = f"acdc_{args.model}_c{args.base_channels}_{datetime.now().strftime('%m%d_%H%M')}"
@@ -469,6 +719,7 @@ def main():
     print(f"Model:      {model_name} | Params={params:,}")
     print(f"Training:   BS={args.batch_size} | LR={args.lr} | Epochs={args.epochs}")
     print(f"DeepSup:    {'ON' if args.deep_supervision else 'OFF'} | AMP={'ON' if args.use_amp else 'OFF'}")
+    print(f"Seed:       {args.seed} | Deterministic={'ON' if args.deterministic else 'OFF'}")
 
     # ── HD95 spacing ────────────────────────────────────────────────────
     metadata_path = os.path.join(args.data_dir, 'metadata.json')
@@ -497,16 +748,29 @@ def main():
         base_dataset = ACDCDataset2D(args.data_dir, in_channels=in_channels)
         aug_dataset = None
 
-    num_vols = len(base_dataset.vol_paths)
-    vol_indices = list(range(num_vols))
-    np.random.seed(42)
-    np.random.shuffle(vol_indices)
-    split = int(num_vols * 0.8)
-    train_vols = set(vol_indices[:split])
-    val_vols = set(vol_indices[split:])
+    volume_ids = [acdc_volume_id(path) for path in base_dataset.vol_paths]
+    if args.split_manifest is None:
+        args.split_manifest = os.path.join(
+            args.save_dir, f"{args.exp_name}_split_seed{args.seed}.json")
 
-    train_idx = [i for i, (v, _) in enumerate(base_dataset.index_map) if v in train_vols]
-    val_idx = [i for i, (v, _) in enumerate(base_dataset.index_map) if v in val_vols]
+    if os.path.exists(args.split_manifest) and not args.overwrite_split:
+        split_manifest = load_acdc_split_manifest(args.split_manifest)
+        print(f"Split:      loaded patient manifest {args.split_manifest}")
+    else:
+        split_manifest = create_acdc_patient_split_manifest(
+            volume_ids=volume_ids,
+            seed=args.seed,
+            train_fraction=args.train_fraction,
+            output_path=args.split_manifest,
+        )
+        print(f"Split:      saved patient manifest {args.split_manifest}")
+
+    train_idx, val_idx = indices_from_acdc_split_manifest(
+        base_dataset, split_manifest)
+    print(
+        f"Patients:   Train={len(split_manifest['splits']['train']['patients'])} | "
+        f"Val={len(split_manifest['splits']['val']['patients'])}"
+    )
 
     if is_hybrid and aug_dataset:
         train_ds = Subset(aug_dataset, train_idx)
@@ -521,9 +785,19 @@ def main():
         print(f"Augmentation: OFF")
 
     val_ds = Subset(base_dataset, val_idx)
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.seed)
     train_loader = DataLoader(train_ds, args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=True)
+                              num_workers=args.num_workers,
+                              pin_memory=(device == 'cuda'),
+                              worker_init_fn=seed_worker,
+                              generator=loader_generator)
     print(f"Data:       Train={len(train_ds)} | Val={len(val_ds)} slices")
+
+    resolved_config_path = os.path.join(args.save_dir, f"{args.exp_name}_resolved_config.json")
+    with open(resolved_config_path, 'w') as f:
+        json.dump(vars(args), f, indent=2)
+    print(f"Config:     resolved args saved to {resolved_config_path}")
 
     # ── Loss & Optimizer ────────────────────────────────────────────────
     class_weights = None if args.no_class_weights else \

@@ -36,8 +36,8 @@ Input: X ∈ ℝ^(B × 5 × 224 × 224)
                         │                  │
                 ┌───────▼───────┐  ┌───────▼───────────┐
                 │   STAGE 1     │  │     STAGE 1        │
-                │ 2× SG-DCNv4  │  │  Global2DFFTMixer  │
-                │ + Mamba scan  │  │  @ 56²             │
+                │ 2× SG-Deform │  │  Global2DFFTMixer  │
+                │ + scan mixer │  │  @ 56²             │
                 └───────┬───────┘  └───────┬───────────┘
                         │                  │
                    ┌────▼──────────────────▼────┐
@@ -48,8 +48,8 @@ Input: X ∈ ℝ^(B × 5 × 224 × 224)
                         │                  │
                 ┌───────▼───────┐  ┌───────▼───────────┐
                 │   STAGE 2     │  │     STAGE 2        │
-                │ 4× SG-DCNv4  │  │  Global2DFFTMixer  │
-                │ + Mamba scan  │  │  @ 56²             │
+                │ 4× SG-Deform │  │  Global2DFFTMixer  │
+                │ + scan mixer │  │  @ 56²             │
                 └───────┬───────┘  └───────┬───────────┘
                         │                  │
                    ┌────▼──────────────────▼────┐
@@ -58,8 +58,8 @@ Input: X ∈ ℝ^(B × 5 × 224 × 224)
                         │                  │
                 ┌───────▼───────┐  ┌───────▼───────────┐
                 │   STAGE 3     │  │     STAGE 3        │
-                │ 6× SG-DCNv4  │  │  Global2DFFTMixer  │
-                │ + Mamba scan  │  │  @ 56²             │
+                │ 6× SG-Deform │  │  Global2DFFTMixer  │
+                │ + scan mixer │  │  @ 56²             │
                 └───────┬───────┘  └───────┬───────────┘
                         │                  │
                    ┌────▼──────────────────▼────┐
@@ -152,28 +152,31 @@ Maps 3-channel input to `C`-channel feature space.
 
 ### 2.2 Three Stages with HDC Dilation Pyramids
 
-Each stage consists of SGDCNv4 blocks (Spectral-Guided Deformable Conv)
-followed by a CrossScanGatedMixer (Mamba-style scan). The number of blocks
-and dilation values increase per stage:
+Each stage consists of spectral-guided deformable-convolution blocks followed
+by a Mamba-inspired `CrossScanGatedMixer` scan approximation. The number of
+blocks and dilation values increase per stage:
 
-| Stage | SGDCNv4 Blocks | Dilations | Mamba Scan | Receptive Field |
+| Stage | Deformable Blocks | Dilations | Scan Approximation | Receptive Field |
 |-------|---------------|-----------|------------|-----------------|
 | 1 | 2 | \[1, 2\] | 1-pass (forward H) | Local |
 | 2 | 4 | \[1, 2, 4, 8\] | 2-pass (bidirectional H) | Medium |
 | 3 | 6 | \[1, 2, 4, 8, 16, 32\] | 4-pass (cross-scan H+W) | Global |
 
-**Total: 12 SGDCNv4 blocks + 3 Mamba blocks**
+**Total: 12 spectral-guided deformable blocks + 3 scan-mixer blocks**
 
-The **Hybrid Dilated Convolution (HDC)** pyramid prevents gridding artifacts
-by progressively expanding the receptive field within each stage.
+The dilation pyramid is intended to expand the receptive field within each
+stage. It should not be described as a mathematical guarantee against gridding
+without a separate proof or ablation.
 
 After each stage, an **ABX exchange** occurs before proceeding to the next
 stage. Intermediates from stages 1 and 2 are captured for deep supervision.
 
 ### 2.3 SGDCNv4Block — Spectral-Guided Deformable Convolution
 
-This is the core innovation block. Each SGDCNv4Block contains two residual
-connections:
+`SGDCNv4Block` is the current code name, but the paper wording should be
+"spectral-guided deformable-convolution block" because the implementation uses
+`torchvision.ops.deform_conv2d`, not a verified DCNv4 operator. Each block
+contains two residual connections:
 
 ```
 Input x
@@ -212,9 +215,10 @@ Key design decisions:
 - Offset/mask initialized to zero (identity deformation at init)
 - `num_groups=4` for deformable conv, `expansion=4` for FFN
 
-### 2.4 CrossScanGatedMixer (Mamba-style, in Precision branch only)
+### 2.4 CrossScanGatedMixer (Mamba-Inspired Approximation)
 
-Simulates State Space Model scanning with configurable directionality:
+Approximates directional sequence mixing with linear layers, gates, and
+depthwise `Conv1d`; it is not a true selective state-space Mamba kernel.
 
 | `num_passes` | Scan Pattern | Description |
 |-------------|--------------|-------------|
@@ -278,7 +282,7 @@ Input x (B, C, H, W)
 Output (B, C, H, W)
 ```
 
-**Why FFT over Conv1d pseudo-Mamba?**
+**Why FFT over Conv1d scan approximation?**
 - The old `CrossScanGatedMixer` used `Conv1d(kernel_size=3)` — effectively
   a 3-pixel sliding window with no true long-range dependency
 - `Global2DFFTMixer` operates in the 2D frequency domain, so every output
@@ -292,9 +296,9 @@ Each `Global2DFFTMixer` block corresponds to one PrecisionStem stage:
 
 | Context Stage | Matching Precision Stage | ABX Exchange |
 |--------------|-------------------------|--------------|
-| FFTMixer #1 | Stage 1 (2× SGDCNv4) | ABX #1 |
-| FFTMixer #2 | Stage 2 (4× SGDCNv4) | ABX #2 |
-| FFTMixer #3 | Stage 3 (6× SGDCNv4) | ABX #3 |
+| FFTMixer #1 | Stage 1 (2 deformable blocks) | ABX #1 |
+| FFTMixer #2 | Stage 2 (4 deformable blocks) | ABX #2 |
+| FFTMixer #3 | Stage 3 (6 deformable blocks) | ABX #3 |
 
 **Output:** `feat_z_ctx ∈ (B, C, 56, 56)`
 
@@ -373,9 +377,9 @@ Step 2: Conv1×1(C→4C) → PixelShuffle(2) → DWConv3×3 → GN → GELU
         (112² → 224²)
 ```
 
-The depthwise convolutions (`groups=C`) after each PixelShuffle act as
-**anti-checkerboard filters**, smoothing the shuffle artifacts that would
-otherwise introduce high-frequency noise into the upsampled context.
+The depthwise convolutions (`groups=C`) after each PixelShuffle are intended as
+anti-checkerboard smoothing filters; their effect should be verified in
+ablation.
 
 **Output:** `ctx_up ∈ (B, C, 224, 224)`
 
@@ -417,10 +421,10 @@ Step 3: Reconstruction
     feat_fused = fused_low + feat_high             # high-freq edges untouched
 ```
 
-**Why Gaussian (not Sigmoid) low-pass?** A Sigmoid cutoff in frequency domain
-causes **Gibbs ringing** — oscillatory artifacts near sharp transitions. The
-Gaussian roll-off provides smooth attenuation, eliminating ringing at the
-cost of a softer transition band.
+**Why Gaussian (not Sigmoid) low-pass?** A sigmoid cutoff in frequency domain
+can introduce a sharper transition than a Gaussian roll-off. The Gaussian mask
+is a conservative smoothing choice, but the cutoff and artifact behavior still
+require ablation.
 
 **Default `cutoff_ratio=0.25`** — the low-pass mask covers the central 25%
 of the frequency spectrum.
@@ -558,73 +562,59 @@ Predictions are assembled back into 3D volumes for evaluation:
 
 ## 9. Training Configuration
 
+Paper-facing experiments should be launched from a config file so the split,
+hyperparameters, output directory, and seed are captured with the run:
+
+```bash
+python src/training/train_acdc.py --config configs/acdc_asym_v31.yaml
+```
+
+The wrapper script uses the same config:
+
+```bash
+bash scripts/train_acdc_reproducible.sh
+```
+
 | Parameter | Value |
 |-----------|-------|
 | Optimizer | AdamW |
 | Learning Rate | 3e-4 |
 | Weight Decay | 1e-5 |
-| LR Schedule | Warmup (10 epochs) → CosineAnnealing → ReduceLROnPlateau |
+| LR Schedule | Warmup (10 epochs) -> CosineAnnealing -> ReduceLROnPlateau |
 | Batch Size | 4 |
-| Image Size | 224 × 224 |
+| Image Size | 224 x 224 |
 | Mixed Precision | AMP with GradScaler |
 | Gradient Clipping | max_norm = 1.0 |
-| Early Stopping | patience = 30 epochs (based on HD95) |
+| Early Stopping | patience = 30 epochs |
 | Epochs | 250 |
 | Input Channels | 5 (2.5D stack) |
 | Base Channels | 48 |
 | Num Classes | 4 (BG, RV, MYO, LV) |
-| Parameters | ~673K |
+| Split | patient-level manifest at `splits/acdc_patient_split_seed42.json` |
 
-**Training command:**
-
-```bash
-python src/training/train_acdc.py \
-    --model asym_spec_mamba \
-    --base_channels 48 \
-    --data_dir preprocessed_data/ACDC/training \
-    --batch_size 4 \
-    --epochs 250 \
-    --lr 3e-4 \
-    --weight_decay 1e-5 \
-    --warmup_epochs 10 \
-    --early_stop 30 \
-    --use_amp \
-    --deep_supervision \
-    --class_weights 0.1,2.5,1.5,1.0 \
-    --hd95_unit pixel \
-    --save_dir weights \
-    --exp_name acdc_asym_v31_c48
-```
+The local default data path is `preprocessed_data/ACDC`. The previous
+`preprocessed_data/ACDC/training` command is not the current workspace path.
 
 ---
 
-## 10. Results
+## 10. Results Status
 
-### 10.1 v3.1 Performance
+Historical numbers from prior runs should be treated as **not paper-ready**
+until rerun with:
 
-| Metric | Best Value |
-|--------|-----------|
-| **Dice** | 0.9051 |
-| **HD95** (pixel) | 1.0968 |
-| **Balanced** | 0.1348 |
+- patient-level train/validation/test or cross-validation split,
+- saved split manifest,
+- config/resolved args archived with the run,
+- strict evaluation checkpoint loading,
+- explicit HD95 unit (`pixel` or `mm`),
+- baseline and ablation tables.
 
-### 10.2 Version Comparison
-
-| Metric | v2 (SpecMambaHybridNet) | v3 (AsymSpecMambaDCN) | v3.1 (+FFT+ABX) | Δ v3→v3.1 |
-|--------|------------------------|----------------------|-----------------|-----------|
-| Best Dice | 0.9035 | 0.9049 | **0.9051** | +0.0002 |
-| Best HD95 | 1.1627 | 1.1335 | **1.0968** | **-0.0367** |
-| Best Balanced | — | 0.1106 | **0.1348** | +0.0242 |
-| Parameters | ~593K | ~593K | **~673K** | +80K |
-
-**Key takeaway:** v3.1's FFT context + ABX exchange delivered a **3.2%
-relative improvement in HD95** (1.1335→1.0968) — the primary target metric —
-while Dice remained stable. The 80K parameter increase (~14%) is negligible
-relative to the HD95 gain.
+Do not compare pixel HD95 directly against ACDC leaderboard or paper results
+reported in millimeters.
 
 ---
 
-## 11. Design Rationale & Ablation Insights
+## 11. Design Rationale & Required Ablations
 
 ### Why Global2DFFTMixer over CrossScanGatedMixer?
 
@@ -635,9 +625,8 @@ context branch is global understanding, which a kernel-3 convolution cannot
 provide.
 
 `Global2DFFTMixer` operates in the 2D frequency domain where every output
-pixel depends on every input pixel. At 56×56 resolution, the FFT overhead
-is minimal (~3136 pixels), making it both faster and more effective than
-a long Conv1d.
+pixel can depend on global frequency content. At 56x56 resolution, the FFT
+overhead is small enough to test as a practical low-resolution context mixer.
 
 ### Why ABX (not just end-to-end fusion)?
 
@@ -648,7 +637,7 @@ This caused:
 2. **Redundant computation** — both branches independently learned
    overlapping representations without sharing information
 
-ABX solves both:
+ABX is intended to address both:
 - **ctx→prec** (channel scale): guides which DCN features matter most
 - **prec→ctx** (spatial residual): forces context to learn complementary
   info via the difference signal `(prec_down - ctx_feat)`
@@ -672,16 +661,15 @@ Routing 3 slices to DCN@224² and 5 slices to FFT@56² reduces DCN FLOPs by
 ### Why frequency-split fusion (not additive)?
 
 v2 used direct additive fusion (`feat = feat_local + upsample(feat_context)`),
-which blurred high-frequency boundary details. The frequency-split approach
-preserves the DCN's hard-earned edge features by only modifying the
-low-frequency (semantic) component. This directly targets HD95 improvement.
+which may blur high-frequency boundary details. The frequency-split approach
+is designed to preserve edge features by only modifying the low-frequency
+(semantic) component. Its HD95 value must be validated by ablation.
 
 ### Why Gaussian LP filter (not learnable sigmoid)?
 
-A sigmoid cutoff in frequency domain creates a sharp transition that causes
-Gibbs ringing artifacts. The Gaussian roll-off provides smooth attenuation
-without ringing. The `cutoff_ratio` hyperparameter controls the boundary
-between "low" and "high" frequency.
+A sigmoid cutoff in frequency domain can create a sharper transition than a
+Gaussian roll-off. The `cutoff_ratio` hyperparameter controls the boundary
+between "low" and "high" frequency and should be ablated.
 
 ### Why SDF detach in gate?
 
@@ -689,6 +677,19 @@ If gradients flow from the gate through the SDF prediction, the SDF head
 would be trained to produce "good gates" rather than "accurate SDFs". The
 `detach()` ensures the SDF head is trained purely by the SDF MSE loss,
 while the gate learns to leverage whatever SDF the head produces.
+
+Required ablations before paper claims:
+
+- 1-slice, 3-slice, and 5-slice input variants.
+- Symmetric full-resolution routing vs asymmetric 3/5-slice routing.
+- Deformable convolution vs plain/dilated/depthwise convolution.
+- Spectral guidance on/off in the deformable block.
+- `Global2DFFTMixer` vs Conv1d scan vs attention or true Mamba/SS2D baseline.
+- ABX off, context-to-precision only, precision-to-context only.
+- Additive fusion vs frequency-split fusion.
+- SDF gate on/off and SDF detach on/off.
+- CompoundHDLoss vs Dice+CE+Focal.
+- Deep supervision and context-head supervision on/off.
 
 ---
 
@@ -699,9 +700,9 @@ src/
 ├── models/
 │   └── specmamba_net.py          # Both SpecMambaNet (v1) and AsymSpecMambaDCN (v3.1)
 │       ├── SpectralGuidanceBlock    # FFT-based spectral feature extraction
-│       ├── SGDCNv4Block             # Spectral-Guided Deformable Conv + FFN
-│       ├── CrossScanGatedMixer      # Mamba-style scanner (Precision branch only)
-│       ├── PrecisionStem            # Branch A: 12× SGDCNv4 at full resolution
+│       ├── SGDCNv4Block             # Spectral-guided deformable-conv block
+│       ├── CrossScanGatedMixer      # Mamba-inspired scan approximation
+│       ├── PrecisionStem            # Branch A: 12 deformable blocks at full resolution
 │       ├── Global2DFFTMixer         # Learned 2D spectral filter (NEW v3.1)
 │       ├── AsymBidirectionalExchange# Per-stage cross-branch exchange (NEW v3.1)
 │       ├── GlobalContextEncoder     # Branch B: progressive ↓ + 3× FFTMixer
@@ -723,99 +724,77 @@ src/
 
 ---
 
-## 13. Related Work & SOTA Landscape (2024–2026)
+## 13. Related Work and Baseline Requirements
 
-A comprehensive survey of recent methods on the ACDC cardiac MRI benchmark
-and related techniques relevant to AsymSpecMambaDCN.
+This section is a checklist, not a SOTA claim. The paper still needs a sourced
+related-work table and reproduced comparisons under the same split and metrics.
 
-### 13.1 ACDC Leaderboard — Current SOTA
+Minimum comparison set:
 
-| Method | Year | Venue | Avg Dice | HD95 | Key Innovation |
-|--------|------|-------|----------|------|----------------|
-| **CardioSAM** | 2025 | arXiv | **93.39%** | 4.2 mm | Topology-aware decoder on frozen SAM encoder |
-| **GH-UNet** | 2025 | npj Dig Med | 92.61% | — | — |
-| **H2Former** | 2024 | — | 92.40% | — | Hybrid CNN-Transformer |
-| **MOSformer** | 2025 | — | 92.19% | — | Dual-encoder 2.5D inter-slice fusion |
-| **EMCAD** | 2025 | — | 92.12% | — | — |
-| **nnUNet** | 2024 | — | 91.61% | — | Self-adapting framework |
-| **SAMba-UNet** | 2025 | arXiv | 91.03% | **1.09 mm** | SAM2 + Mamba + UNet dual-encoder |
-| **Ours (v3.1)** | 2025 | — | 90.51% | 1.10 px | Asym 2.5D DCN + FFT Context + ABX |
+- 2D U-Net and 2.5D U-Net/UNet++.
+- nnU-Net 2D/3D or cascade configuration.
+- HRNet-style segmentation baseline.
+- Transformer baseline such as TransUNet/Swin-Unet/SwinUNETR where feasible.
+- Medical Mamba/SSM baseline where feasible.
+- Internal legacy `SpecMambaNet` and `HRNetDCN` baselines if retained.
 
-### 13.2 Mamba / SSM-Based Medical Segmentation
+Protocol requirements:
 
-| Paper | Year | Key Technique | ACDC Result |
-|-------|------|---------------|-------------|
-| **CFG-MambaNet** | 2026 | Variable-scale SSM + frequency-guided | SOTA on 4 datasets |
-| **SAMba-UNet** | 2025 | SAM2 + Mamba dual-encoder + HOACM fusion | Dice 91.03%, HD95 1.09 mm |
-| **GLM-SFNet** | 2025 | 4-dir Mamba + Learnable Descriptive Conv | SOTA lightweight |
-| **Mamba-SAM** | 2026 | Frozen SAM + VMamba + MFGC | Dice 90.6% |
-
-### 13.3 Frequency-Domain Methods
-
-| Paper | Year | Technique | Insight |
-|-------|------|-----------|---------|
-| **FFTMed** | 2025 | Fully FFT domain processing | Adversarial-resilient |
-| **FDE-Net** | 2026 | Low-Freq Info Extraction + Mamba | 91.29% DSC on ISIC |
-| **SFD-Mamba2Net** | 2025 | Curvature-Aware + Progressive High-Freq | Multi-level wavelet |
-| **Ours** | — | Gaussian LP split + FFT context mixer | Dual FFT usage |
-
-### 13.4 Deformable Convolution in Medical Imaging
-
-| Paper | Year | Technique | Result |
-|-------|------|-----------|--------|
-| **DCNv4** | 2024 | Remove softmax + memory-optimized | 3x faster than DCNv3 |
-| **SGDC** | 2026 | Pooling-free structure-guided dynamic conv | HD95 -2.05 |
-| **Ours** | — | Spectral-Guided DCNv4 (FFT→offsets) | Frequency-informed deformation |
+- per-class RV/MYO/LV Dice and HD95,
+- ED/ES reporting where applicable,
+- HD95 unit in mm when spacing metadata is valid,
+- parameter count, FLOPs or MACs, latency, and memory,
+- mean +/- std over folds or seeds.
 
 ---
 
 ## 14. Upgrade Roadmap — Evidence-Based Prioritization
 
-### Tier 1: Loss Function (High Impact, Low Effort)
+### Tier 1: Loss Function (Candidate Experiments)
 
 | # | Upgrade | Expected Impact |
 |---|---------|-----------------|
-| 1 | **FocusSDF** — boundary-weighted SDF loss | HD95 -10-15% |
-| 2 | **Regional HD Loss** — differentiable erosion-based | HD95 -10-20% |
+| 1 | Boundary-weighted SDF loss | Test HD95 sensitivity |
+| 2 | Regional or erosion-based HD-style loss | Test HD95 sensitivity |
 | 3 | **Curvature-Aware Loss** — 2nd-order smoothness | Smoother boundaries |
 
-### Tier 2: Optimizer & Augmentation (Medium Impact, Low Effort)
+### Tier 2: Optimizer & Augmentation (Candidate Experiments)
 
 | # | Upgrade | Expected Impact |
 |---|---------|-----------------|
-| 4 | **SAM Optimizer** (Sharpness-Aware Minimization) | Dice +0.5-1% |
-| 5 | **CutMix Augmentation** | Dice +1-5% |
-| 6 | **Elastic Deformation** across 2.5D stack | Dice +0.3-0.5% |
+| 4 | Sharpness-aware optimizer | Compare stability |
+| 5 | CutMix / mix-style augmentation | Compare Dice and HD95 |
+| 6 | Elastic deformation across 2.5D stack | Compare robustness |
 
-### Tier 3: Architecture (High Impact, Medium-High Effort)
+### Tier 3: Architecture (Candidate Experiments)
 
 | # | Upgrade | Expected Impact |
 |---|---------|-----------------|
-| 7 | **Multi-Frequency Gated Conv** (3-4 bands) | HD95 -5-10% |
-| 8 | **Boundary Attention** before DCN (Sobel-guided) | HD95 -5-10% |
+| 7 | Multi-frequency gated fusion | Compare cutoff/frequency handling |
+| 8 | Boundary attention before deformable conv | Compare RV boundary precision |
 | 9 | **Topology Loss** (PI-Att) | Correct topology |
 
-### Tier 4: Post-Processing (Medium Impact, Very Low Effort)
+### Tier 4: Post-Processing (Candidate Experiments)
 
 | # | Upgrade | Expected Impact |
 |---|---------|-----------------|
-| 10 | **Connected Component** — keep largest per class | HD95 -5-15% |
-| 11 | **TTA** — flip + rotate ensemble | Dice +0.5%, HD95 -5% |
+| 10 | Connected-component filtering | Compare false positives |
+| 11 | TTA — flip/rotate ensemble | Compare inference-time tradeoff |
 
 ---
 
 ## 15. Paper Positioning — Unique Contributions
 
-1. **Spectral-Guided Deformable Conv (SG-DCNv4):** FFT-based offset guidance
-   — distinct from SGDC's Sobel-based approach and standard DCNv4
+1. **Spectral-Guided Deformable Conv:** FFT-based offset guidance implemented
+   with `torchvision.ops.deform_conv2d`.
 2. **Global2DFFTMixer for Context:** Full-spatial-RF frequency-domain context
-   encoder replacing limited-RF Conv1d pseudo-Mamba
+   encoder replacing the limited-RF Conv1d scan approximation.
 3. **Asymmetric Bidirectional Exchange (ABX):** Per-stage cross-branch
    information flow with asymmetric mechanisms (channel scale vs spatial
    residual) designed to preserve boundary precision
-4. **Frequency-Split Fusion with SDF Gate:** Novel combination of FFT
-   decomposition + SDF-conditioned gating for artifact-free feature fusion
+4. **Frequency-Split Fusion with SDF Gate:** Combination of FFT decomposition
+   and SDF-conditioned gating for controlled context injection
 5. **Asymmetric 2.5D Routing:** Explicitly decouples boundary precision from
    context capture with different compute budgets and receptive field strategies
-6. **Sub-700K parameter model** competitive with foundation-model approaches
-   at 100-1000x fewer parameters
+6. **Lightweight model target:** parameter efficiency should be reported against
+   baselines once parameter/FLOP/latency measurements are reproduced.

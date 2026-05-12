@@ -1,13 +1,13 @@
 """
-3-Stream Asymmetric Spec-HRNet — Frequency-Guided Architecture
+SpecMamba model family — legacy tri-stream baseline and current 2.5D model.
 
-FR (224², DWConv):  Local edge refinement at full resolution
-HR (112², FFT):     Global spectral mixing at half resolution
-LR (56²,  Mamba):   Long-range sequential context at quarter resolution
+`SpecMambaNet` is the older 3-stream baseline. The current paper-facing model is
+`AsymSpecMambaDCN`, an asymmetric 2.5D dual-branch architecture with full-res
+precision features, low-res Fourier context, ABX exchange, and SDF-gated
+frequency-split fusion.
 
-Per-stage TriFuseLayer: all-to-all asymmetric cross-fuse (6 paths).
-Final TriStreamFusion: FR edges gate HR+LR to suppress false positives.
-Pure PyTorch — no external dependencies.
+The scan blocks are Mamba-inspired approximations built from linear layers and
+depthwise Conv1d, not true selective SSM/Mamba kernels.
 """
 
 import torch
@@ -45,11 +45,10 @@ class PriorKnowledgeConstructor(nn.Module):
 # =============================================================================
 
 class DCNv3Block(nn.Module):
-    """DCNv3-style Deformable Conv — adaptive edge refinement at full-res.
+    """Deformable-convolution block used by the legacy tri-stream baseline.
     
-    Inverted Bottleneck: Expand → DCNv3 (grouped deformable conv + modulation) → Shrink.
+    Inverted Bottleneck: Expand -> deformable conv with offsets/mask -> shrink.
     Supports HDC dilation for multi-scale receptive fields.
-    Paper: "InternImage: Exploring Large-Scale Vision Foundation Models with DCNv3"
     """
     def __init__(self, dim, expansion=4, kernel_size=3, num_groups=4, dilation=1):
         super().__init__()
@@ -228,7 +227,7 @@ class HRSkipAttention(nn.Module):
 
 
 class LRSkipAttention(nn.Module):
-    """LR: Uncertainty-guided attention for Mamba hallucination suppression."""
+    """LR: Uncertainty-guided attention for scan-mixer ambiguity suppression."""
     def __init__(self, dim):
         super().__init__()
         self.proj = nn.Conv2d(dim, dim // 2, 1, bias=False)
@@ -321,7 +320,7 @@ class TriStreamFusion(nn.Module):
 class SpecMambaNet(nn.Module):
     """3-Stream Frequency-Guided HRNet.
 
-    FR (224², C):   DCNv3Block — adaptive edge refinement (deformable conv)
+    FR (224², C):   Deformable-conv block — adaptive edge refinement
     HR (112², C):   AdaptiveFourierMixer — global spectral mixing
     LR (56², 2C):   CrossScanGatedMixer — sequential context
     TriFuseLayer per stage, TriStreamFusion at end.
@@ -387,7 +386,7 @@ class SpecMambaNet(nn.Module):
             modes = mode_pyramid[s]
             passes = scan_pyramid[s]
             
-            # FR: DCNv3 with HDC dilation pyramid
+            # FR: deformable conv with dilation pyramid
             self.fr_stages.append(nn.Sequential(*[
                 ResidualBlock(DCNv3Block(C, dilation=dils[i]), C)
                 for i in range(depth)]))
@@ -397,7 +396,7 @@ class SpecMambaNet(nn.Module):
                 ResidualBlock(AdaptiveFourierMixer(C, modes), C)
                 for _ in range(depth)]))
             
-            # LR: MambaBlock with scan depth pyramid
+            # LR: Mamba-inspired scan mixer with scan-depth pyramid
             self.lr_stages.append(nn.Sequential(*[
                 ResidualBlock(CrossScanGatedMixer(C*2, num_passes=passes), C*2)
                 for _ in range(depth)]))
@@ -471,10 +470,10 @@ def specmamba_large(num_classes=4, in_channels=3, deep_supervision=False):
 #  Input:  (B, 5, H, W) — 5 consecutive slices; predict center-slice mask.
 #
 #  Branch A — Precision Stem:
-#       x[:, 1:4] (k-1, k, k+1)  →  12× SGDCNv4 @ 224²  →  feat_center
+#       x[:, 1:4] (k-1, k, k+1)  →  12× SG-DeformConv @ 224²  →  feat_center
 #
 #  Branch B — Global Context:
-#       x (all 5 slices)  →  Conv(stride=4) → 3× PseudoMamba @ 56²  →  feat_z_ctx
+#       x (all 5 slices)  →  progressive downsampling → 3× FFT mixer @ 56²
 #
 #  Branch C — Frequency-Split Fusion:
 #       feat_z_ctx → PixelShuffle(×4) → ctx_up
@@ -516,7 +515,7 @@ class SpectralGuidanceBlock(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-#  Core Block: Spectral-Guided DCNv4  (SG-DCNv4)
+#  Core Block: Spectral-Guided Deformable Convolution
 # ---------------------------------------------------------------------------
 
 class SGDCNv4Block(nn.Module):
@@ -527,6 +526,10 @@ class SGDCNv4Block(nn.Module):
     3) deform_conv2d at `dim` channels (memory-safe at full resolution).
     4) Post-DCN FFN (inverted bottleneck: dim → dim*expansion → dim).
     Two residual connections per block.
+
+    The class name is retained for checkpoint/code compatibility; paper text
+    should describe this as spectral-guided deformable convolution rather than
+    a verified DCNv4 operator.
     """
 
     def __init__(self, dim, dilation=1, kernel_size=3, num_groups=4, expansion=4):
@@ -593,14 +596,14 @@ class SGDCNv4Block(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-#  Branch A: Precision Stem  (12× SGDCNv4 with HDC dilations)
+#  Branch A: Precision Stem  (12 spectral-guided deformable blocks)
 # ---------------------------------------------------------------------------
 
 class PrecisionStem(nn.Module):
     """Isotropic full-resolution stem for boundary-precise features.
 
     Input:  x_local (B, 3, H, W) — center 3 slices [k-1, k, k+1].
-    Stages: [2, 4, 6] SGDCNv4 blocks with HDC dilation pyramids,
+    Stages: [2, 4, 6] spectral-guided deformable blocks with dilation pyramids,
             each followed by a CrossScanGatedMixer.
     Output: feat_center (B, C, H, W) at full resolution.
     """
@@ -613,19 +616,19 @@ class PrecisionStem(nn.Module):
             nn.GroupNorm(min(8, C), C),
             nn.GELU(),
         )
-        # Stage 1: 2× SGDCNv4 [d=1,2] + bidi-Mamba
+        # Stage 1: 2 deformable blocks [d=1,2] + scan mixer
         self.stage1_dcn = nn.ModuleList([
             SGDCNv4Block(C, dilation=1), SGDCNv4Block(C, dilation=2),
         ])
         self.stage1_mamba = CrossScanGatedMixer(C, num_passes=1)
 
-        # Stage 2: 4× SGDCNv4 [d=1,2,4,8] + bidi-Mamba
+        # Stage 2: 4 deformable blocks [d=1,2,4,8] + scan mixer
         self.stage2_dcn = nn.ModuleList([
             SGDCNv4Block(C, dilation=d) for d in [1, 2, 4, 8]
         ])
         self.stage2_mamba = CrossScanGatedMixer(C, num_passes=2)
 
-        # Stage 3: 6× SGDCNv4 [d=1,2,4,8,16,32] + cross-scan-Mamba
+        # Stage 3: 6 deformable blocks [d=1,2,4,8,16,32] + cross-scan mixer
         self.stage3_dcn = nn.ModuleList([
             SGDCNv4Block(C, dilation=d) for d in [1, 2, 4, 8, 16, 32]
         ])
@@ -636,7 +639,7 @@ class PrecisionStem(nn.Module):
         return self.stem_conv(x)
 
     def forward_stage(self, x, stage_idx):
-        """Run a single DCN stage + its local Mamba scan."""
+        """Run a single deformable-conv stage plus its local scan mixer."""
         dcn_blocks = [self.stage1_dcn, self.stage2_dcn, self.stage3_dcn][stage_idx]
         mamba_blk = [self.stage1_mamba, self.stage2_mamba, self.stage3_mamba][stage_idx]
         for blk in dcn_blocks:
@@ -659,7 +662,7 @@ class PrecisionStem(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-#  Branch B: Global 2D FFT Mixer  (replaces Conv1d pseudo-Mamba)
+#  Branch B: Global 2D FFT Mixer  (replaces Conv1d scan approximation)
 # ---------------------------------------------------------------------------
 
 class Global2DFFTMixer(nn.Module):
@@ -766,7 +769,7 @@ class GlobalContextEncoder(nn.Module):
 
     v2 changes over v1:
       - Progressive 2-step downsampling (224→112→56) instead of 1-step stride-4
-      - Global2DFFTMixer blocks (full spatial RF) instead of Conv1d pseudo-Mamba
+      - Global2DFFTMixer blocks (full spatial RF) instead of Conv1d scan approximation
       - 3 stages matching PrecisionStem for per-stage ABX exchange
 
     Input:   x (B, 5, H, W) — full 2.5D stack.

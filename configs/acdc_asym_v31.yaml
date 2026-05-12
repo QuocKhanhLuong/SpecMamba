@@ -1,0 +1,42 @@
+experiment:
+  name: acdc_asym_v31_c48
+
+data:
+  data_dir: preprocessed_data/ACDC
+  batch_size: 4
+  num_workers: 4
+
+model:
+  model: asym_spec_mamba
+  base_channels: 48
+  deep_supervision: true
+
+training:
+  epochs: 250
+  lr: 0.0003
+  weight_decay: 0.00001
+  warmup_epochs: 10
+  early_stop: 30
+  use_amp: true
+  augment: false
+
+loss:
+  class_weights: [0.1, 2.5, 1.5, 1.0]
+  ce_weight: 0.5
+  dice_weight: 1.0
+  focal_weight: 0.5
+  boundary_weight: 1.5
+
+split:
+  train_fraction: 0.8
+  split_manifest: splits/acdc_patient_split_seed42.json
+
+evaluation:
+  hd95_unit: pixel
+
+output:
+  save_dir: weights
+
+reproducibility:
+  seed: 42
+  deterministic: false

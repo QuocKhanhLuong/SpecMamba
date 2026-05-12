@@ -345,6 +345,7 @@ class EGMCombinedLoss(nn.Module):
 
         return losses
 
+def _demo():
     batch_size, num_classes, height, width = 2, 3, 64, 64
 
     pred = torch.randn(batch_size, num_classes, height, width)
@@ -360,3 +361,7 @@ class EGMCombinedLoss(nn.Module):
     boundary_loss_fn = BoundaryAwareLoss()
     boundary_loss = boundary_loss_fn(pred, target)
     print(f"\nBoundary Loss: {boundary_loss.item():.4f}")
+
+
+if __name__ == "__main__":
+    _demo()

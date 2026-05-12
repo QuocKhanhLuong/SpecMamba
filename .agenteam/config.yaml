@@ -1,0 +1,120 @@
+version: "2"
+
+roles:
+  researcher:
+    reasoning_effort: high
+    write_scope:
+      - "docs/research/**"
+      - "docs/survey/**"
+      - "papers/**"
+      - "notes/**"
+
+  pm:
+    reasoning_effort: high
+    write_scope:
+      - "docs/plans/**"
+      - "docs/roadmap/**"
+      - "docs/experiments/**"
+      - "notes/**"
+
+  architect:
+    reasoning_effort: high
+    write_scope:
+      - "docs/designs/**"
+      - "docs/experiments/**"
+      - "configs/**"
+      - "src/**"
+      - "models/**"
+      - "lib/**"
+
+  dev:
+    reasoning_effort: high
+    write_scope:
+      - "src/**"
+      - "models/**"
+      - "datasets/**"
+      - "losses/**"
+      - "metrics/**"
+      - "configs/**"
+      - "scripts/**"
+      - "experiments/**"
+      - "tests/**"
+
+  qa:
+    reasoning_effort: medium
+    write_scope:
+      - "tests/**"
+      - "scripts/**"
+      - "configs/**"
+      - "docs/qa/**"
+      - "docs/experiments/**"
+
+  reviewer:
+    reasoning_effort: high
+
+final_verify:
+  - "python -m pytest -q"
+
+final_verify_policy: warn
+final_verify_max_retries: 0
+
+pipeline:
+  stages:
+    - name: research
+      roles: [researcher]
+      gate: human
+
+    - name: strategy
+      roles: [pm, researcher]
+      gate: human
+
+    - name: design
+      roles: [architect, researcher]
+      gate: human
+
+    - name: plan
+      roles: [architect, dev]
+      gate: human
+
+    - name: implement
+      roles: [dev]
+      gate: auto
+      verify: "python -m pytest -q"
+      max_retries: 1
+      rework_to: plan
+
+    - name: test
+      roles: [qa]
+      gate: auto
+
+    - name: review
+      roles: [reviewer]
+      gate: human
+
+  profiles:
+    quick:
+      stages: [plan, implement, test]
+      hints:
+        - "bug fix"
+        - "shape mismatch"
+        - "config change"
+        - "training script fix"
+        - "dataset loader fix"
+
+    experiment:
+      stages: [research, design, plan, implement, test, review]
+      hints:
+        - "new model block"
+        - "new loss"
+        - "new ablation"
+        - "new dataset"
+        - "new experiment"
+
+    paper:
+      stages: [research, strategy, design, review]
+      hints:
+        - "paper idea"
+        - "related work"
+        - "novelty"
+        - "method section"
+        - "ablation plan"
