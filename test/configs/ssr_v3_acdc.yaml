@@ -1,0 +1,34 @@
+run_name: ssr_v3_acdc_debug
+seed: 42
+data_root: preprocessed_data/ACDC
+output_root: test/outputs
+input_mode: 2d
+image_size: 128
+max_slices: 300
+foreground_only: true
+batch_size: 4
+num_workers: 2
+epochs: 80
+lr: 0.0003
+weight_decay: 0.0001
+base_channels: 32
+num_classes: 4
+num_bands: 4
+grad_clip: 3.0
+device: cuda
+
+loss_weights:
+  boundary_bce: 0.50
+  boundary_dice: 0.30
+  boundary_frequency: 0.20
+  tv: 0.03
+  gate_reg: 0.03
+
+ssr:
+  update_budget: 1.5
+  min_update: 0.08
+  noise_strength: 0.04
+  retain_floor: [0.15, 0.18, 0.22, 0.28]
+  suppress_max: [0.10, 0.30, 0.50, 0.50]
+  update_target: [0.30, 0.30, 0.25, 0.15]
+  noise_aware_suppress: true
