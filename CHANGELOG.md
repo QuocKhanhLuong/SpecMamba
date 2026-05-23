@@ -7,6 +7,8 @@
 - Added `test/run_phase2_variants.sh` to run all Phase Test 2 block-architecture
   ablations sequentially: `baseline_ssr`, `ssr_se`, `ssr_se_bounded`,
   `ssr_se_lk`, `ssr_se_dcn`, and `ssr_full`.
+- Added `tests/test_myops_preprocess.py` with synthetic NIfTI checks for paired
+  MyoPS modality preprocessing and unknown-label rejection.
 
 ### Changed
 
@@ -20,6 +22,16 @@
   smoke tests.
 - Updated the phase-2 docs to describe `ssr_se_dcn` as the local DCNv4-style
   path instead of an external-operator dependency.
+- Updated `scripts/preprocess_myops2020.py` so each MyoPS patient is saved as
+  one paired multi-sequence volume with shape `[3,H,W,D]` plus one `[H,W,D]`
+  mask, instead of three independent single-modality samples with duplicated
+  masks.
+- Added MyoPS preprocessing validation for modality/GT shape, affine,
+  orientation, spacing, and allowed label values, with per-modality
+  normalization stats and label histograms written to metadata.
+- Updated `scripts/visualize_myops2020.py` to validate geometry before overlay,
+  show GT overlays on all three modalities, remove duplicate image rendering,
+  and use writable matplotlib/fontconfig cache directories.
 
 ### Validation
 
@@ -31,6 +43,8 @@
 - Passed a 1-epoch CPU smoke train for `ssr_se_dcn` on local preprocessed ACDC
   slices:
   `conda run -n alvin python -B test/train_ssr_acdc.py --config test/configs/ssr_phase2_acdc_224.yaml --variant ssr_se_dcn --epochs 1 --batch_size 2 --image_size 32 --device cpu --num_workers 0 --max_slices 4 --output_root /private/tmp/specumamba_ssr_phase2_smoke --run_name dcnv4_lite_smoke`
+- Verified the new MyoPS preprocessing tests fail on the old single-modality
+  behavior and pass after the paired-volume fix.
 
 ## 2026-05-23
 

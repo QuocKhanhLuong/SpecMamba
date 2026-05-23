@@ -1,9 +1,9 @@
 """
-Preprocess MyoPS2020 dataset: Multi-sequence Cardiac MRI → .npy volumes
+Preprocess MyoPS2020 dataset: multi-sequence Cardiac MRI -> .npy volumes
 
 MyoPS2020 has 3 MRI modalities per patient (C0/bSSFP, DE/LGE, T2), all
-co-registered to the same spatial domain. Each modality is stored as a
-separate volume but shares the same geometry and ground truth.
+co-registered to the same spatial domain. The preprocessed output keeps these
+modalities paired as channels of one patient volume.
 
 Ground truth labels (remapped to contiguous classes for training):
     Original → Class
@@ -14,10 +14,10 @@ Ground truth labels (remapped to contiguous classes for training):
     1220     → 4  Edema
     2221     → 5  Scar
 
-Output format (matching ACDC preprocessing convention):
+Output format:
     preprocessed_data/MyoPS2020/training/
-        volumes/  ← patient{ID}_{modality}.npy  (H, W, D) float32
-        masks/    ← patient{ID}_{modality}.npy  (H, W, D) uint8
+        volumes/  <- patient{ID}.npy  (3, H, W, D) float32, modality order C0/DE/T2
+        masks/    <- patient{ID}.npy  (H, W, D) uint8
         metadata.json
 
 Usage:
@@ -27,61 +27,151 @@ Usage:
         --size 224
 """
 
+import argparse
+import json
 import os
 import re
-import argparse
-import numpy as np
+
 import nibabel as nib
-from tqdm import tqdm
-import json
+import numpy as np
+from nibabel.orientations import aff2axcodes
 from skimage.transform import resize
+from tqdm import tqdm
 
 
-# ─── Label remapping ─────────────────────────────────────────────────────────
+MODALITIES = ["C0", "DE", "T2"]
+MODALITY_NAMES = {"C0": "bSSFP", "DE": "LGE", "T2": "T2-weighted"}
+
 ORIGINAL_LABELS = [0, 200, 500, 600, 1220, 2221]
 CLASS_NAMES = ["Background", "Myocardium", "LV", "RV", "Edema", "Scar"]
 NUM_CLASSES = len(CLASS_NAMES)
-
 LABEL_REMAP = {orig: idx for idx, orig in enumerate(ORIGINAL_LABELS)}
+ALLOWED_LABELS = set(ORIGINAL_LABELS)
 
 
 def remap_labels(mask):
-    """Remap original MyoPS label values (0,200,500,600,1220,2221) → (0,1,2,3,4,5)."""
+    """Remap original MyoPS labels to contiguous classes after validation."""
+    mask_int = np.rint(mask).astype(np.int32)
+    unknown = sorted(set(np.unique(mask_int).tolist()) - ALLOWED_LABELS)
+    if unknown:
+        raise ValueError(
+            "Unknown MyoPS labels encountered: "
+            f"{unknown}. Expected only {sorted(ALLOWED_LABELS)}."
+        )
+
     out = np.zeros_like(mask, dtype=np.uint8)
     for orig, new in LABEL_REMAP.items():
-        out[mask == orig] = new
+        out[mask_int == orig] = new
     return out
 
 
 def normalize_zscore(image):
-    """Z-score normalization with outlier clipping."""
-    p05 = np.percentile(image, 0.5)
-    p995 = np.percentile(image, 99.5)
-    image = np.clip(image, p05, p995)
-    mean, std = np.mean(image), np.std(image)
-    return (image - mean) / std if std > 0 else image - mean
+    """Robust per-volume z-score normalization.
+
+    Percentiles and statistics are estimated from nonzero finite voxels when
+    available, which is safer for sparse MR backgrounds than using all padded
+    image values.
+    """
+    image = np.asarray(image, dtype=np.float32)
+    finite = np.isfinite(image)
+    region = finite & (image != 0)
+    if not np.any(region):
+        region = finite
+    values = image[region]
+    if values.size == 0:
+        return np.zeros_like(image, dtype=np.float32), {
+            "clip_percentiles": [0.5, 99.5],
+            "clip_values": [0.0, 0.0],
+            "mean": 0.0,
+            "std": 1.0,
+            "stats_region": "empty",
+        }
+
+    p05, p995 = np.percentile(values, [0.5, 99.5])
+    clipped = np.clip(image, p05, p995)
+    clipped_values = clipped[region]
+    mean = float(np.mean(clipped_values))
+    std = float(np.std(clipped_values))
+    if not np.isfinite(std) or std < 1e-6:
+        std = 1.0
+    normalized = (clipped - mean) / std
+    normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+    return normalized.astype(np.float32), {
+        "clip_percentiles": [0.5, 99.5],
+        "clip_values": [float(p05), float(p995)],
+        "mean": mean,
+        "std": std,
+        "stats_region": "nonzero_finite" if np.any(finite & (image != 0)) else "finite",
+    }
 
 
 def discover_patients(data_dir):
     """Find all patient IDs from the train25 folder."""
     train_dir = os.path.join(data_dir, "train25")
+    if not os.path.isdir(train_dir):
+        raise FileNotFoundError(
+            f"Missing MyoPS train25 directory: {train_dir}. "
+            "Expected raw layout with train25/ and train25_myops_gd/."
+        )
     ids = set()
     for f in os.listdir(train_dir):
         m = re.match(r"myops_training_(\d+)_", f)
         if m:
             ids.add(int(m.group(1)))
+    if not ids:
+        raise FileNotFoundError(f"No myops_training_* files found under {train_dir}")
     return sorted(ids)
+
+
+def _histogram(values):
+    unique, counts = np.unique(values, return_counts=True)
+    return {str(int(v)): int(c) for v, c in zip(unique, counts)}
+
+
+def _validate_geometry(pid, reference_nii, candidate_nii, candidate_name):
+    """Fail fast if a modality/GT is not aligned to the reference image."""
+    ref_shape = reference_nii.shape
+    cand_shape = candidate_nii.shape
+    if cand_shape != ref_shape:
+        raise ValueError(
+            f"Patient {pid}: {candidate_name} shape {cand_shape} does not match "
+            f"reference C0 shape {ref_shape}."
+        )
+
+    ref_affine = reference_nii.affine
+    cand_affine = candidate_nii.affine
+    if not np.allclose(cand_affine, ref_affine, atol=1e-3):
+        raise ValueError(
+            f"Patient {pid}: {candidate_name} affine does not match C0 affine. "
+            "Do not share GT across modalities until geometry is aligned."
+        )
+
+    ref_codes = aff2axcodes(ref_affine)
+    cand_codes = aff2axcodes(cand_affine)
+    if cand_codes != ref_codes:
+        raise ValueError(
+            f"Patient {pid}: {candidate_name} orientation {cand_codes} does not "
+            f"match C0 orientation {ref_codes}."
+        )
+
+    ref_zooms = reference_nii.header.get_zooms()[:3]
+    cand_zooms = candidate_nii.header.get_zooms()[:3]
+    if not np.allclose(cand_zooms, ref_zooms, atol=1e-3):
+        raise ValueError(
+            f"Patient {pid}: {candidate_name} spacing {cand_zooms} does not "
+            f"match C0 spacing {ref_zooms}."
+        )
 
 
 def preprocess_patient(data_dir, pid, target_size=(224, 224)):
     """Process one MyoPS2020 patient: load all 3 modalities + ground truth.
 
-    Each modality is saved as a separate volume (same convention as ACDC
-    which saves ED and ES as separate volumes). The ground truth is shared
-    across modalities since images are co-registered.
+    The returned image volume is channel-first `[3, H, W, D]`, preserving the
+    `C0`, `DE`, `T2` pairing needed for MyoPS multi-sequence experiments.
 
     Returns:
-        list of (volume, mask, volume_id, spacing_info) tuples
+        list with one `(volume, mask, volume_id, spacing_info)` tuple. An empty
+        list is returned only when the patient has no ground truth.
     """
     train_dir = os.path.join(data_dir, "train25")
     gd_dir = os.path.join(data_dir, "train25_myops_gd")
@@ -94,60 +184,79 @@ def preprocess_patient(data_dir, pid, target_size=(224, 224)):
 
     gd_nii = nib.load(gd_path)
     gd_data = gd_nii.get_fdata()
+    gd_remapped = remap_labels(gd_data)
 
-    results = []
-
-    for mod in ["C0", "DE", "T2"]:
+    modality_niis = {}
+    for mod in MODALITIES:
         img_path = os.path.join(train_dir, f"myops_training_{pid}_{mod}.nii.gz")
         if not os.path.exists(img_path):
-            print(f"  Warning: Missing {mod} for patient {pid}")
-            continue
+            raise FileNotFoundError(f"Patient {pid}: missing required modality {mod}: {img_path}")
+        modality_niis[mod] = nib.load(img_path)
 
-        try:
-            img_nii = nib.load(img_path)
-            img_data = img_nii.get_fdata()
-            orig_shape = img_data.shape
-            orig_spacing = img_nii.header.get_zooms()  # (sx, sy, sz) in mm
-            num_slices = img_data.shape[2]
+    ref_nii = modality_niis["C0"]
+    _validate_geometry(pid, ref_nii, gd_nii, "ground truth")
+    for mod, img_nii in modality_niis.items():
+        _validate_geometry(pid, ref_nii, img_nii, mod)
 
-            # Z-score normalize
-            img_norm = normalize_zscore(img_data)
+    orig_shape = ref_nii.shape
+    if len(orig_shape) != 3:
+        raise ValueError(f"Patient {pid}: expected 3D NIfTI volumes, got shape {orig_shape}")
+    orig_spacing = ref_nii.header.get_zooms()[:3]
+    num_slices = orig_shape[2]
 
-            # Remap ground truth labels to contiguous 0..5
-            gd_remapped = remap_labels(gd_data)
+    eff_spacing_x = float(orig_spacing[0]) * orig_shape[0] / target_size[0]
+    eff_spacing_y = float(orig_spacing[1]) * orig_shape[1] / target_size[1]
+    eff_spacing_z = float(orig_spacing[2])
 
-            # Compute effective spacing after resize
-            eff_spacing_y = float(orig_spacing[0]) * orig_shape[0] / target_size[0]
-            eff_spacing_x = float(orig_spacing[1]) * orig_shape[1] / target_size[1]
-            eff_spacing_z = float(orig_spacing[2])
+    resized_modalities = np.zeros(
+        (len(MODALITIES), target_size[0], target_size[1], num_slices),
+        dtype=np.float32,
+    )
+    resized_mask = np.zeros((target_size[0], target_size[1], num_slices), dtype=np.uint8)
+    normalization_stats = {}
 
-            # Resize slice-by-slice
-            resized_img = np.zeros((target_size[0], target_size[1], num_slices), dtype=np.float32)
-            resized_mask = np.zeros((target_size[0], target_size[1], num_slices), dtype=np.uint8)
+    for mod_idx, mod in enumerate(MODALITIES):
+        img_data = modality_niis[mod].get_fdata(dtype=np.float32)
+        img_norm, stats = normalize_zscore(img_data)
+        normalization_stats[mod] = stats
+        for i in range(num_slices):
+            resized_modalities[mod_idx, :, :, i] = resize(
+                img_norm[:, :, i],
+                target_size,
+                order=1,
+                preserve_range=True,
+                anti_aliasing=True,
+                mode="reflect",
+            )
 
-            for i in range(num_slices):
-                resized_img[:, :, i] = resize(
-                    img_norm[:, :, i], target_size,
-                    order=1, preserve_range=True, anti_aliasing=True, mode='reflect'
-                )
-                resized_mask[:, :, i] = resize(
-                    gd_remapped[:, :, i], target_size,
-                    order=0, preserve_range=True, anti_aliasing=False, mode='reflect'
-                ).astype(np.uint8)
+    for i in range(num_slices):
+        resized_mask[:, :, i] = resize(
+            gd_remapped[:, :, i],
+            target_size,
+            order=0,
+            preserve_range=True,
+            anti_aliasing=False,
+            mode="reflect",
+        ).astype(np.uint8)
 
-            spacing_info = {
-                'orig_shape': [int(s) for s in orig_shape],
-                'orig_spacing': [float(s) for s in orig_spacing],
-                'effective_spacing': [eff_spacing_z, eff_spacing_y, eff_spacing_x],
-            }
+    spacing_info = {
+        "modalities": MODALITIES,
+        "num_modalities": len(MODALITIES),
+        "volume_layout": "C,H,W,D",
+        "mask_layout": "H,W,D",
+        "orig_shape": [int(s) for s in orig_shape],
+        "orig_spacing_xyz": [float(s) for s in orig_spacing],
+        "effective_spacing_xyz": [eff_spacing_x, eff_spacing_y, eff_spacing_z],
+        # Kept for compatibility with existing metadata consumers.
+        "effective_spacing": [eff_spacing_z, eff_spacing_y, eff_spacing_x],
+        "orientation": "".join(aff2axcodes(ref_nii.affine)),
+        "affine": ref_nii.affine.astype(float).tolist(),
+        "normalization": normalization_stats,
+        "label_histogram_original": _histogram(np.rint(gd_data).astype(np.int32)),
+        "label_histogram_remapped": _histogram(gd_remapped),
+    }
 
-            volume_id = f"patient{pid}_{mod}"
-            results.append((resized_img, resized_mask, volume_id, spacing_info))
-
-        except Exception as e:
-            print(f"  Error: patient {pid} modality {mod}: {e}")
-
-    return results
+    return [(resized_modalities, resized_mask, f"patient{pid}", spacing_info)]
 
 
 def main():
@@ -170,7 +279,7 @@ def main():
     os.makedirs(masks_dir, exist_ok=True)
 
     patient_ids = discover_patients(args.input)
-    print(f"MyoPS2020 Preprocessing: {len(patient_ids)} patients × 3 modalities")
+    print(f"MyoPS2020 Preprocessing: {len(patient_ids)} paired patients × 3 modalities")
     print(f"  Labels: {dict(zip(CLASS_NAMES, range(NUM_CLASSES)))}")
     print(f"  Target size: {target_size}")
     print()
@@ -206,18 +315,28 @@ def main():
         'class_names': CLASS_NAMES,
         'original_labels': ORIGINAL_LABELS,
         'label_remap': {str(k): v for k, v in LABEL_REMAP.items()},
-        'modalities': ['C0', 'DE', 'T2'],
-        'modality_names': {'C0': 'bSSFP', 'DE': 'LGE', 'T2': 'T2-weighted'},
+        'modalities': MODALITIES,
+        'modality_names': MODALITY_NAMES,
+        'input_channels': len(MODALITIES),
+        'volume_layout': 'C,H,W,D',
+        'mask_layout': 'H,W,D',
         'target_size': list(target_size),
         'total_volumes': len(volume_info),
         'total_patients': len(patient_ids),
+        'preprocessing': {
+            'pair_modalities_per_patient': True,
+            'normalize': 'per-modality robust z-score over nonzero finite voxels',
+            'image_resize_order': 1,
+            'mask_resize_order': 0,
+            'geometry_validation': 'shape, affine, orientation, spacing must match C0',
+        },
         'volume_info': volume_info,
     }
     with open(os.path.join(args.output, 'metadata.json'), 'w') as f:
         json.dump(metadata, f, indent=2)
 
     print(f"\nDone! Processed: {processed}, Skipped: {skipped}")
-    print(f"Total volumes: {len(volume_info)} ({len(patient_ids)} patients × 3 modalities)")
+    print(f"Total volumes: {len(volume_info)} paired patient volumes")
     print(f"Output: {args.output}")
 
 

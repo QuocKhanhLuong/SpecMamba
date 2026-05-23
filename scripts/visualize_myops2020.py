@@ -1,8 +1,8 @@
 """
 Visualize raw MyoPS2020 data before preprocessing.
 
-Shows all 3 modalities (C0/bSSFP, DE/LGE, T2) alongside the ground truth
-segmentation for each patient. Supports multi-slice navigation.
+Shows static QA grids for all 3 modalities (C0/bSSFP, DE/LGE, T2) with ground
+truth overlays for each patient.
 
 MyoPS2020 Label Map:
     0    = Background
@@ -21,11 +21,34 @@ Usage:
 import os
 import argparse
 import re
+import tempfile
 import numpy as np
 import nibabel as nib
+
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "specumamba_mpl"))
+os.environ.setdefault("XDG_CACHE_HOME", os.path.join(tempfile.gettempdir(), "specumamba_xdg_cache"))
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+os.makedirs(os.environ["XDG_CACHE_HOME"], exist_ok=True)
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.colors import ListedColormap
+
+try:
+    from preprocess_myops2020 import (
+        ALLOWED_LABELS,
+        MODALITIES,
+        MODALITY_NAMES,
+        _histogram,
+        _validate_geometry,
+    )
+except ImportError:  # pragma: no cover - supports `python -m scripts.visualize_myops2020`
+    from scripts.preprocess_myops2020 import (
+        ALLOWED_LABELS,
+        MODALITIES,
+        MODALITY_NAMES,
+        _histogram,
+        _validate_geometry,
+    )
 
 
 # ─── Label mapping ───────────────────────────────────────────────────────────
@@ -38,12 +61,14 @@ LABEL_MAP = {
     2221: ("Scar",        [1.0, 0.0, 1.0, 0.7]),     # magenta
 }
 
-MODALITY_NAMES = {"C0": "bSSFP (C0)", "DE": "LGE (DE)", "T2": "T2-weighted"}
+DISPLAY_MODALITY_NAMES = {"C0": "bSSFP (C0)", "DE": "LGE (DE)", "T2": "T2-weighted"}
 
 
 def discover_patients(data_dir):
     """Find all patient IDs from the train25 folder."""
     train_dir = os.path.join(data_dir, "train25")
+    if not os.path.isdir(train_dir):
+        raise FileNotFoundError(f"Missing MyoPS train25 directory: {train_dir}")
     ids = set()
     for f in os.listdir(train_dir):
         m = re.match(r"myops_training_(\d+)_", f)
@@ -58,22 +83,25 @@ def load_patient(data_dir, pid):
     gd_dir = os.path.join(data_dir, "train25_myops_gd")
 
     images = {}
-    for mod in ["C0", "DE", "T2"]:
+    for mod in MODALITIES:
         path = os.path.join(train_dir, f"myops_training_{pid}_{mod}.nii.gz")
         if os.path.exists(path):
             nii = nib.load(path)
             images[mod] = {
+                "nii": nii,
                 "data": nii.get_fdata(),
                 "spacing": nii.header.get_zooms(),
+                "affine": nii.affine,
             }
 
     gd_path = os.path.join(gd_dir, f"myops_training_{pid}_gd.nii.gz")
     gd = None
+    gd_nii = None
     if os.path.exists(gd_path):
         gd_nii = nib.load(gd_path)
         gd = gd_nii.get_fdata()
 
-    return images, gd
+    return images, gd, gd_nii
 
 
 def make_label_overlay(gd_slice):
@@ -97,64 +125,92 @@ def make_legend_patches():
     return patches
 
 
+def display_window(sl):
+    """Return robust display limits for one image slice."""
+    positive = sl[np.isfinite(sl) & (sl > 0)]
+    if positive.size:
+        vmin, vmax = np.percentile(positive, [1, 99])
+    else:
+        finite = sl[np.isfinite(sl)]
+        vmin, vmax = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 1.0)
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+        vmin, vmax = 0.0, 1.0
+    return vmin, vmax
+
+
+def validate_loaded_patient(pid, images, gd, gd_nii):
+    """Validate raw geometry and label set before visualization overlays."""
+    missing = [mod for mod in MODALITIES if mod not in images]
+    if missing:
+        raise FileNotFoundError(f"Patient {pid}: missing modalities {missing}")
+    if gd is None or gd_nii is None:
+        raise FileNotFoundError(f"Patient {pid}: missing ground truth")
+
+    ref_nii = images["C0"]["nii"]
+    _validate_geometry(pid, ref_nii, gd_nii, "ground truth")
+    for mod in MODALITIES:
+        _validate_geometry(pid, ref_nii, images[mod]["nii"], mod)
+
+    labels = np.rint(gd).astype(np.int32)
+    unknown = sorted(set(np.unique(labels).tolist()) - ALLOWED_LABELS)
+    if unknown:
+        raise ValueError(
+            f"Patient {pid}: unknown labels {unknown}. Expected only {sorted(ALLOWED_LABELS)}."
+        )
+
+
 def visualize_patient(data_dir, pid, save_dir=None):
     """Visualize all slices for a single patient."""
-    images, gd = load_patient(data_dir, pid)
+    images, gd, gd_nii = load_patient(data_dir, pid)
 
     if not images:
         print(f"  [SKIP] Patient {pid}: no image data found")
         return
+    validate_loaded_patient(pid, images, gd, gd_nii)
 
-    ref_mod = list(images.keys())[0]
-    num_slices = images[ref_mod]["data"].shape[2]
-    spacing = images[ref_mod]["spacing"]
+    num_slices = images["C0"]["data"].shape[2]
+    spacing = images["C0"]["spacing"]
 
-    print(f"  Patient {pid}: shape={images[ref_mod]['data'].shape}, "
+    print(f"  Patient {pid}: shape={images['C0']['data'].shape}, "
           f"spacing={tuple(round(s, 3) for s in spacing)}, slices={num_slices}")
 
     # Print label distribution
     if gd is not None:
-        unique, counts = np.unique(gd, return_counts=True)
+        label_hist = _histogram(np.rint(gd).astype(np.int32))
         total = gd.size
         print(f"    Labels: " + ", ".join(
             f"{LABEL_MAP.get(int(v), ('?',))[0]}({int(v)})={c/total*100:.1f}%"
-            for v, c in zip(unique, counts)
+            for v, c in label_hist.items()
         ))
 
-    n_cols = 4  # C0, DE, T2, GD overlay
+    n_cols = len(MODALITIES) * 2
     fig, axes = plt.subplots(num_slices, n_cols, figsize=(4 * n_cols, 4 * num_slices))
     if num_slices == 1:
         axes = axes[np.newaxis, :]
 
     fig.suptitle(
-        f"MyoPS2020 — Patient {pid}  |  Shape: {images[ref_mod]['data'].shape}  |  "
+        f"MyoPS2020 — Patient {pid}  |  Shape: {images['C0']['data'].shape}  |  "
         f"Spacing: {tuple(round(s, 2) for s in spacing)} mm",
         fontsize=14, fontweight="bold", y=1.0
     )
 
     for s in range(num_slices):
-        for col, mod in enumerate(["C0", "DE", "T2"]):
-            ax = axes[s, col]
-            if mod in images:
-                sl = images[mod]["data"][:, :, s]
-                ax.imshow(sl, cmap="gray", aspect="equal")
-                vmin, vmax = np.percentile(sl[sl > 0], [1, 99]) if sl.max() > 0 else (0, 1)
-                ax.imshow(sl, cmap="gray", vmin=vmin, vmax=vmax, aspect="equal")
-            else:
-                ax.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax.transAxes)
-            ax.set_title(f"{MODALITY_NAMES.get(mod, mod)} — Slice {s}", fontsize=10)
+        overlay = make_label_overlay(gd[:, :, s]) if gd is not None else None
+        for mod_idx, mod in enumerate(MODALITIES):
+            sl = images[mod]["data"][:, :, s]
+            vmin, vmax = display_window(sl)
+
+            ax = axes[s, mod_idx * 2]
+            ax.imshow(sl, cmap="gray", vmin=vmin, vmax=vmax, aspect="equal")
+            ax.set_title(f"{DISPLAY_MODALITY_NAMES.get(mod, mod)} — Slice {s}", fontsize=10)
             ax.axis("off")
 
-        # Ground truth overlay on C0
-        ax = axes[s, 3]
-        if "C0" in images and gd is not None:
-            c0_sl = images["C0"]["data"][:, :, s]
-            vmin, vmax = np.percentile(c0_sl[c0_sl > 0], [1, 99]) if c0_sl.max() > 0 else (0, 1)
-            ax.imshow(c0_sl, cmap="gray", vmin=vmin, vmax=vmax, aspect="equal")
-            overlay = make_label_overlay(gd[:, :, s])
-            ax.imshow(overlay, aspect="equal")
-        ax.set_title(f"GT on C0 — Slice {s}", fontsize=10)
-        ax.axis("off")
+            ax = axes[s, mod_idx * 2 + 1]
+            ax.imshow(sl, cmap="gray", vmin=vmin, vmax=vmax, aspect="equal")
+            if overlay is not None:
+                ax.imshow(overlay, aspect="equal")
+            ax.set_title(f"GT on {mod} — Slice {s}", fontsize=10)
+            ax.axis("off")
 
     # Add legend
     patches = make_legend_patches()
@@ -179,8 +235,11 @@ def print_dataset_summary(data_dir):
     print("=" * 70)
     print("MyoPS2020 Dataset Summary")
     print("=" * 70)
-    print(f"  Training patients : {len(patient_ids)}  (IDs: {patient_ids[0]}–{patient_ids[-1]})")
-    print(f"  Modalities        : C0 (bSSFP), DE (LGE), T2")
+    if patient_ids:
+        print(f"  Training patients : {len(patient_ids)}  (IDs: {patient_ids[0]}-{patient_ids[-1]})")
+    else:
+        print("  Training patients : 0")
+    print(f"  Modalities        : {', '.join(f'{m} ({MODALITY_NAMES[m]})' for m in MODALITIES)}")
     print(f"  Label values      : 0=BG, 200=Myo, 500=LV, 600=RV, 1220=Edema, 2221=Scar")
 
     # Count test files
@@ -191,7 +250,10 @@ def print_dataset_summary(data_dir):
             m = re.match(r"myops_test_(\d+)_", f)
             if m:
                 test_ids.add(int(m.group(1)))
-        print(f"  Test patients     : {len(test_ids)}  (IDs: {min(test_ids)}–{max(test_ids)})")
+        if test_ids:
+            print(f"  Test patients     : {len(test_ids)}  (IDs: {min(test_ids)}-{max(test_ids)})")
+        else:
+            print("  Test patients     : 0")
     print("=" * 70)
 
 
