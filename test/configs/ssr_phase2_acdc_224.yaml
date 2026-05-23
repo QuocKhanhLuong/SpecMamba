@@ -5,7 +5,6 @@ output_root: test/outputs
 
 input_mode: 2d
 image_size: 224
-max_slices: 600
 foreground_only: true
 
 batch_size: 8

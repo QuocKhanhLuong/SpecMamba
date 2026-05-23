@@ -1,5 +1,37 @@
 # CHANGELOG.md
 
+## 2026-05-24
+
+### Added
+
+- Added `test/run_phase2_variants.sh` to run all Phase Test 2 block-architecture
+  ablations sequentially: `baseline_ssr`, `ssr_se`, `ssr_se_bounded`,
+  `ssr_se_lk`, `ssr_se_dcn`, and `ssr_full`.
+
+### Changed
+
+- Replaced the external-extension `DCNv4Refine` wrapper with a local
+  pure-PyTorch DCNv4-style geometry block in `test/ssr_blocks.py`. The block
+  follows the official module-level design with value projection, grouped
+  offset/mask prediction, unnormalized deformable aggregation, and output
+  projection, but uses `grid_sample` instead of the official fused CUDA op.
+- Removed `max_slices` from the SSR experiment YAML configs; default runs now
+  use all eligible ACDC slices. The CLI override remains available for explicit
+  smoke tests.
+- Updated the phase-2 docs to describe `ssr_se_dcn` as the local DCNv4-style
+  path instead of an external-operator dependency.
+
+### Validation
+
+- Passed compile checks for the SSR experiment files with base Python and
+  `conda run -n alvin`.
+- Passed shell syntax validation for `test/run_phase2_variants.sh`.
+- Passed synthetic forward/backward checks for all six phase-2 architecture
+  variants, including the local `ssr_se_dcn` path.
+- Passed a 1-epoch CPU smoke train for `ssr_se_dcn` on local preprocessed ACDC
+  slices:
+  `conda run -n alvin python -B test/train_ssr_acdc.py --config test/configs/ssr_phase2_acdc_224.yaml --variant ssr_se_dcn --epochs 1 --batch_size 2 --image_size 32 --device cpu --num_workers 0 --max_slices 4 --output_root /private/tmp/specumamba_ssr_phase2_smoke --run_name dcnv4_lite_smoke`
+
 ## 2026-05-23
 
 ### Added

@@ -75,7 +75,6 @@ def apply_config_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg.setdefault("output_root", "test/outputs")
     cfg.setdefault("input_mode", "2d")
     cfg.setdefault("image_size", 128)
-    cfg.setdefault("max_slices", None)
     cfg.setdefault("foreground_only", True)
     cfg.setdefault("batch_size", 4)
     cfg.setdefault("num_workers", 2)
@@ -114,7 +113,7 @@ def apply_config_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     ssr.setdefault("se_reduction", 4)
     ssr.setdefault("geometry_refine", "none")
     ssr.setdefault("large_kernel_size", 7)
-    ssr.setdefault("dcnv4_group", 4)
+    ssr.setdefault("dcnv4_group", 2)
     ssr.setdefault("use_hf_ratio_penalty", True)
     ssr.setdefault("hf_ratio_threshold", 4.0)
     return cfg
@@ -177,7 +176,7 @@ def make_loaders(cfg: dict[str, Any]) -> tuple[DataLoader, DataLoader, dict[str,
         input_mode=cfg["input_mode"],
         image_size=int(cfg["image_size"]),
         foreground_only=bool(cfg["foreground_only"]),
-        max_slices=cfg["max_slices"],
+        max_slices=cfg.get("max_slices"),
         seed=int(cfg["seed"]),
     )
     val_ds = ACDCSSRSliceDataset(
@@ -186,7 +185,7 @@ def make_loaders(cfg: dict[str, Any]) -> tuple[DataLoader, DataLoader, dict[str,
         input_mode=cfg["input_mode"],
         image_size=int(cfg["image_size"]),
         foreground_only=bool(cfg["foreground_only"]),
-        max_slices=cfg["max_slices"],
+        max_slices=cfg.get("max_slices"),
         seed=int(cfg["seed"]) + 1,
     )
 

@@ -45,11 +45,11 @@ python test/train_ssr_acdc.py --config test/configs/ssr_v3_acdc.yaml
 Quick smoke run:
 
 ```bash
-python test/train_ssr_acdc.py --config test/configs/ssr_v3_acdc.yaml --epochs 2 --max_slices 32
+python test/train_ssr_acdc.py --config test/configs/ssr_v3_acdc.yaml --epochs 2
 ```
 
-The script supports CLI overrides for `--epochs`, `--max_slices`, `--run_name`,
-`--device`, `--data_root`, `--output_root`, `--batch_size`, and `--num_workers`.
+The script supports CLI overrides for `--epochs`, `--run_name`, `--device`,
+`--data_root`, `--output_root`, `--batch_size`, and `--num_workers`.
 
 ## Analyze
 
@@ -98,8 +98,19 @@ Smoke test:
 python test/train_ssr_acdc.py \
   --config test/configs/ssr_phase2_acdc_224.yaml \
   --epochs 2 \
-  --max_slices 32 \
   --batch_size 8
+```
+
+Run all block-architecture ablations:
+
+```bash
+bash test/run_phase2_variants.sh
+```
+
+Optional quick ablation run:
+
+```bash
+EPOCHS=20 BATCH_SIZE=4 DEVICE=cuda bash test/run_phase2_variants.sh
 ```
 
 Analyze:
@@ -111,7 +122,7 @@ python test/analyze_ssr_logs.py --run_dir test/outputs/ssr_phase2_acdc_224
 CLI overrides:
 
 ```bash
---epochs --batch_size --image_size --max_slices --run_name --device --variant
+--epochs --batch_size --image_size --run_name --device --variant
 ```
 
 Variants:
@@ -120,8 +131,9 @@ Variants:
 - `ssr_se`: adds SE gating on the spectral update.
 - `ssr_se_bounded`: adds SE, bounded gamma, and high-frequency ratio penalty.
 - `ssr_se_lk`: adds large-kernel geometry refinement.
-- `ssr_se_dcn`: adds the DCNv4 geometry refinement path. This requires an
-  installed compatible DCNv4 extension and fails clearly if it is unavailable.
+- `ssr_se_dcn`: adds a pure-PyTorch DCNv4-style geometry refinement path based
+  on the official module structure. It does not require compiling the external
+  DCNv4 CUDA extension, and it is not a speed-equivalent official operator.
 - `ssr_se_deformable`: legacy torchvision deformable-conv refinement using
   `torchvision.ops.deform_conv2d`; this is not DCNv4.
 - `ssr_full`: uses residual channel gate plus large-kernel geometry refinement.
@@ -138,8 +150,8 @@ Notes:
 
 - The trainer automatically retries CUDA OOM by halving batch size: 8 to 4 to 2 to 1.
 - If CUDA is unavailable, it falls back to CPU and uses `num_workers=0` for local stability.
-- `geometry_refine: dcnv4` is the only Phase 2 path intended to mean DCNv4.
-- The DCNv4 wrapper follows the upstream channel constraint: `channels / dcnv4_group`
+- `geometry_refine: dcnv4` now uses the local pure-PyTorch DCNv4-style block.
+- The local DCNv4-style block follows the upstream channel constraint: `channels / dcnv4_group`
   must be divisible by 16. With the default `base_channels: 32`, keep
   `dcnv4_group: 2`; if you increase `base_channels` to 64, `dcnv4_group: 4`
   is also valid.

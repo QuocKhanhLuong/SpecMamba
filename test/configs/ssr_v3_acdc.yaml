@@ -4,7 +4,6 @@ data_root: preprocessed_data/ACDC
 output_root: test/outputs
 input_mode: 2d
 image_size: 128
-max_slices: 300
 foreground_only: true
 batch_size: 4
 num_workers: 2

@@ -179,90 +179,115 @@ class DeformableRefine(nn.Module):
 
 
 class DCNv4Refine(nn.Module):
-    """Optional local geometry refinement using an installed DCNv4 operator.
+    """Pure-PyTorch DCNv4-style local geometry refinement.
 
-    The project does not vendor DCNv4. This wrapper only activates when a
-    compatible external DCNv4 Python module is installed in the active
-    environment. Otherwise it raises a clear error instead of silently falling
-    back to torchvision deformable conv.
+    The official DCNv4 Python module projects values, predicts grouped
+    offset/mask tensors, and then calls a fused CUDA operator for unnormalized
+    deformable aggregation. This experimental block keeps the same module-level
+    structure but implements the sampling path with `grid_sample`, so it runs
+    without compiling the external DCNv4 extension.
+
+    It is intended for controlled ablations, not as a speed-equivalent drop-in
+    replacement for the official CUDA operator.
     """
 
-    def __init__(self, channels: int, kernel_size: int = 3, group: int = 4) -> None:
+    def __init__(
+        self,
+        channels: int,
+        kernel_size: int = 3,
+        group: int = 2,
+        offset_scale: float = 1.0,
+        dw_kernel_size: int | None = 3,
+    ) -> None:
         super().__init__()
         if kernel_size % 2 == 0:
             raise ValueError("dcnv4 kernel_size must be odd to preserve shape")
-        dcnv4_cls = _import_dcnv4_class()
-        padding = kernel_size // 2
-        group = _valid_group(channels, int(group))
-        self.dcn = self._instantiate_dcnv4(
-            dcnv4_cls,
-            channels=channels,
-            kernel_size=kernel_size,
-            padding=padding,
-            group=group,
-        )
+        self.channels = int(channels)
+        self.kernel_size = int(kernel_size)
+        self.kernel_points = self.kernel_size * self.kernel_size
+        self.group = _valid_group(self.channels, int(group))
+        self.group_channels = self.channels // self.group
+        self.offset_scale = float(offset_scale)
+
+        self.value_proj = nn.Conv2d(channels, channels, kernel_size=1)
+        if dw_kernel_size is None:
+            self.offset_mask_dw = None
+        else:
+            self.offset_mask_dw = nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=dw_kernel_size,
+                padding=dw_kernel_size // 2,
+                groups=channels,
+            )
+        self.offset_mask = nn.Conv2d(channels, self.group * self.kernel_points * 3, kernel_size=1)
+        self.output_proj = nn.Conv2d(channels, channels, kernel_size=1)
         self.norm = nn.GroupNorm(_num_groups(channels), channels)
         self.act = nn.GELU()
 
-    @staticmethod
-    def _instantiate_dcnv4(
-        dcnv4_cls: type[nn.Module],
-        *,
-        channels: int,
-        kernel_size: int,
-        padding: int,
-        group: int,
-    ) -> nn.Module:
-        kwargs = {
-            "channels": channels,
-            "kernel_size": kernel_size,
-            "stride": 1,
-            "pad": padding,
-            "dilation": 1,
-            "group": group,
-            "offset_scale": 1.0,
-        }
-        try:
-            return dcnv4_cls(**kwargs)
-        except TypeError:
-            try:
-                return dcnv4_cls(
-                    channels,
-                    kernel_size=kernel_size,
-                    stride=1,
-                    pad=padding,
-                    dilation=1,
-                    group=group,
-                    offset_scale=1.0,
-                )
-            except TypeError as exc:
-                raise TypeError(
-                    "Found a DCNv4 class, but its constructor signature is not "
-                    "compatible with this experimental wrapper."
-                ) from exc
+        center_prior = torch.zeros(1, self.group, self.kernel_points, 1, 1)
+        center_prior[:, :, self.kernel_points // 2] = 1.0
+        self.register_buffer("center_prior", center_prior, persistent=False)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.zeros_(self.offset_mask.weight)
+        nn.init.zeros_(self.offset_mask.bias)
 
     def forward(self, x: Tensor) -> Tensor:
-        y = self._forward_dcnv4(x)
+        if x.ndim != 4:
+            raise ValueError(f"Expected [B,C,H,W], got {tuple(x.shape)}")
+        B, C, H, W = x.shape
+        if C != self.channels:
+            raise ValueError(f"Expected {self.channels} channels, got {C}")
+
+        value = self.value_proj(x)
+        offset_source = self.offset_mask_dw(x) if self.offset_mask_dw is not None else x
+        offset_mask = self.offset_mask(offset_source).view(B, self.group, self.kernel_points, 3, H, W)
+        raw_offset = torch.tanh(offset_mask[:, :, :, :2]) * self.offset_scale
+        weight = self.center_prior.to(dtype=x.dtype, device=x.device) + offset_mask[:, :, :, 2]
+
+        sampled = self._deformable_aggregate(value, raw_offset, weight)
+        y = self.output_proj(sampled)
         return self.act(self.norm(y))
 
-    def _forward_dcnv4(self, x: Tensor) -> Tensor:
-        B, C, H, W = x.shape
-        x_flat = x.permute(0, 2, 3, 1).contiguous().view(B, H * W, C)
-        try:
-            y = self.dcn(x_flat, shape=(H, W))
-        except TypeError:
-            y = self.dcn(x_flat)
-        if y.ndim == 3 and y.shape == (B, H * W, C):
-            return y.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
-        if y.ndim == 4 and y.shape[-1] == C:
-            return y.permute(0, 3, 1, 2).contiguous()
-        if y.shape == x.shape:
-            return y
-        raise RuntimeError(
-            "DCNv4 forward returned an unexpected shape. Expected flattened "
-            "[B,H*W,C], NHWC, or NCHW output "
-            f"compatible with {tuple(x.shape)}, got {tuple(y.shape)}."
-        )
+    def _deformable_aggregate(self, value: Tensor, offset: Tensor, weight: Tensor) -> Tensor:
+        """Grouped unnormalized deformable aggregation.
+
+        Shapes:
+            value:  `[B,C,H,W]`
+            offset: `[B,G,K,2,H,W]` in pixel units, ordered as dy/dx
+            weight: `[B,G,K,H,W]`, intentionally not softmax-normalized
+        """
+        B, C, H, W = value.shape
+        base_y, base_x = _base_coordinate_grid(H, W, value.device, value.dtype)
+        kernel_offsets = _kernel_offsets(self.kernel_size, value.device, value.dtype)
+        output_groups: list[Tensor] = []
+
+        for group_idx in range(self.group):
+            c0 = group_idx * self.group_channels
+            c1 = c0 + self.group_channels
+            group_value = value[:, c0:c1]
+            group_out = torch.zeros_like(group_value)
+            for kernel_idx in range(self.kernel_points):
+                dy = offset[:, group_idx, kernel_idx, 0]
+                dx = offset[:, group_idx, kernel_idx, 1]
+                ky, kx = kernel_offsets[kernel_idx]
+                sample_y = base_y.unsqueeze(0) + ky + dy
+                sample_x = base_x.unsqueeze(0) + kx + dx
+                grid_y = _normalize_grid_coordinate(sample_y, H)
+                grid_x = _normalize_grid_coordinate(sample_x, W)
+                grid = torch.stack((grid_x, grid_y), dim=-1)
+                sampled = F.grid_sample(
+                    group_value,
+                    grid,
+                    mode="bilinear",
+                    padding_mode="zeros",
+                    align_corners=True,
+                )
+                group_out = group_out + sampled * weight[:, group_idx, kernel_idx].unsqueeze(1)
+            output_groups.append(group_out)
+        return torch.cat(output_groups, dim=1)
 
 
 class _BandMLP(nn.Module):
@@ -305,7 +330,7 @@ class SSRBlockV3(nn.Module):
         se_reduction: int = 4,
         geometry_refine: str = "none",
         large_kernel_size: int = 7,
-        dcnv4_group: int = 4,
+        dcnv4_group: int = 2,
         use_hf_ratio_penalty: bool = True,
         hf_ratio_threshold: float = 4.0,
     ) -> None:
@@ -658,31 +683,31 @@ def _valid_group(channels: int, requested: int) -> int:
         if group > 0 and channels % group == 0 and (channels // group) % 16 == 0:
             return group
     raise ValueError(
-        "DCNv4 requires channels/group to be divisible by 16. "
+        "DCNv4-style refine follows the official channels/group divisibility. "
         f"Got channels={channels}, requested group={requested}."
     )
 
 
-def _import_dcnv4_class() -> type[nn.Module]:
-    candidates = (
-        ("DCNv4.modules.dcnv4", "DCNv4"),
-        ("DCNv4.dcnv4", "DCNv4"),
-        ("dcnv4.modules.dcnv4", "DCNv4"),
-        ("dcnv4", "DCNv4"),
-    )
-    errors: list[str] = []
-    for module_name, class_name in candidates:
-        try:
-            module = __import__(module_name, fromlist=[class_name])
-            cls = getattr(module, class_name)
-            if not issubclass(cls, nn.Module):
-                raise TypeError(f"{module_name}.{class_name} is not an nn.Module")
-            return cls
-        except Exception as exc:
-            errors.append(f"{module_name}.{class_name}: {exc}")
-    raise ImportError(
-        "geometry_refine='dcnv4' requires an installed DCNv4 operator. "
-        "This repo does not vendor DCNv4; install the OpenGVLab/DCNv4 extension "
-        "or use geometry_refine='deformable' for the torchvision DCNv2-style path. "
-        "Tried: " + " | ".join(errors)
-    )
+def _base_coordinate_grid(
+    H: int,
+    W: int,
+    device: torch.device | str,
+    dtype: torch.dtype,
+) -> tuple[Tensor, Tensor]:
+    y = torch.arange(H, device=device, dtype=dtype)
+    x = torch.arange(W, device=device, dtype=dtype)
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    return yy, xx
+
+
+def _kernel_offsets(kernel_size: int, device: torch.device | str, dtype: torch.dtype) -> Tensor:
+    radius = kernel_size // 2
+    coords = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
+    yy, xx = torch.meshgrid(coords, coords, indexing="ij")
+    return torch.stack((yy, xx), dim=-1).reshape(kernel_size * kernel_size, 2)
+
+
+def _normalize_grid_coordinate(coord: Tensor, size: int) -> Tensor:
+    if size <= 1:
+        return torch.zeros_like(coord)
+    return coord * (2.0 / float(size - 1)) - 1.0
